@@ -2,16 +2,42 @@ package com.atlas.spectrascan
 
 import android.graphics.RectF
 
+enum class TrackStatus {
+    ACQUIRING,
+    TRACKING,
+    PREDICTED,
+    LOST
+}
+
+enum class TrackingProfile(
+    val title: String,
+    val smoothing: Float,
+    val holdMs: Long,
+    val predictionMs: Long
+) {
+    SMOOTH("SMOOTH", 0.28f, 1_300L, 650L),
+    BALANCED("BALANCED", 0.46f, 950L, 500L),
+    RESPONSIVE("FAST", 0.72f, 650L, 330L);
+
+    fun next(): TrackingProfile = entries[(ordinal + 1) % entries.size]
+}
+
 data class DetectionTarget(
     val trackingId: Int,
     val label: String,
     val confidence: Float,
-    val normalizedBox: RectF
+    val normalizedBox: RectF,
+    val status: TrackStatus = TrackStatus.ACQUIRING,
+    val missingForMs: Long = 0L,
+    val velocityX: Float = 0f,
+    val velocityY: Float = 0f
 )
 
 data class DetectionFrame(
     val targets: List<DetectionTarget> = emptyList(),
     val imageWidth: Int = 1,
     val imageHeight: Int = 1,
-    val inferenceFps: Int = 0
+    val inferenceFps: Int = 0,
+    val inferenceMs: Long = 0L,
+    val brightTrackerActive: Boolean = false
 )
