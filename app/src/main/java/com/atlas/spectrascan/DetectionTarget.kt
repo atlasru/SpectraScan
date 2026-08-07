@@ -27,7 +27,8 @@ enum class TargetFilter(val title: String) {
     PEOPLE("PEOPLE"),
     ANIMALS("ANIMALS"),
     OBJECTS("OBJECTS"),
-    SCREENS("SCREENS");
+    SCREENS("SCREENS"),
+    MOTION("MOTION");
 
     fun next(): TargetFilter = entries[(ordinal + 1) % entries.size]
 }
@@ -41,7 +42,8 @@ data class DetectionTarget(
     val missingForMs: Long = 0L,
     val velocityX: Float = 0f,
     val velocityY: Float = 0f,
-    val fromBrightnessTracker: Boolean = false
+    val fromBrightnessTracker: Boolean = false,
+    val fromMotionTracker: Boolean = false
 )
 
 data class DetectionFrame(
@@ -51,6 +53,7 @@ data class DetectionFrame(
     val inferenceFps: Int = 0,
     val inferenceMs: Long = 0L,
     val brightTrackerActive: Boolean = false,
+    val motionTrackerActive: Boolean = false,
     val targetFilter: TargetFilter = TargetFilter.ALL,
     val rejectedCandidates: Int = 0,
     val meanLuma: Float = 255f,
