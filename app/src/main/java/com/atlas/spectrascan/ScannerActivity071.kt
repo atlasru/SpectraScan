@@ -75,9 +75,13 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.sin
 
 class ScannerActivity071 : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,14 +98,10 @@ private data class Trail071(val x: Float, val y: Float, val at: Long)
 @Composable
 private fun App071() {
     val context = LocalContext.current
-    var granted by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
-    }
+    var granted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
     LaunchedEffect(Unit) { if (!granted) launcher.launch(Manifest.permission.CAMERA) }
-    if (granted) Scanner071() else Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-        Text("Разреши доступ к камере", color = Color.White)
-    }
+    if (granted) Scanner071() else Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) { Text("Разреши доступ к камере", color = Color.White) }
 }
 
 @Composable
@@ -150,11 +150,7 @@ private fun Scanner071() {
             modifier = Modifier.fillMaxSize(), profile = profile, filter = filter, zoom = zoom,
             exposure = exposure, monochrome = monochrome, gain = gain, nightVision = nightVision,
             motionDetectionEnabled = motionDetectionEnabled,
-            onZoomRange = { min, max ->
-                minZoom = min
-                maxZoom = max
-                zoom = zoom.coerceIn(min, max)
-            },
+            onZoomRange = { min, max -> minZoom = min; maxZoom = max; zoom = zoom.coerceIn(min, max) },
             onPreview = { previewView = it },
             onFrame = { next ->
                 frame = if (next.detectionThrottled && next.targets.isEmpty()) next.copy(targets = frame.targets) else next
@@ -175,20 +171,14 @@ private fun Scanner071() {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text("SPECTRASCAN ${BuildConfig.VERSION_NAME}", color = H071, fontSize = 15.sp)
-            Text(
-                "YOLO ${frame.inferenceFps.toString().padStart(2, '0')} FPS  ${frame.inferenceMs} MS  " +
-                    "TGT ${frame.targets.size.toString().padStart(2, '0')}  ${fmtZoom071(zoom)}",
-                color = H071.copy(alpha = .88f), fontSize = 10.sp
-            )
-            Text("$globalStatus // ${frame.targetFilter.title} // LUMA ${frame.meanLuma.toInt()}", color = status071(locked?.status), fontSize = 10.sp)
+            Text("YOLO ${frame.inferenceFps.toString().padStart(2, '0')} FPS  ${frame.inferenceMs} MS  TGT ${frame.targets.size.toString().padStart(2, '0')}  ${fmtZoom071(zoom)}", color = H071.copy(alpha = .88f), fontSize = 10.sp)
+            Text("$globalStatus // ${frame.targetFilter.title} // ${profile.title} // LUMA ${frame.meanLuma.toInt()}", color = status071(locked?.status), fontSize = 10.sp)
             if (motionDetectionEnabled) Text("MOTION DETECTION ON", color = H071.copy(alpha = .72f), fontSize = 9.sp)
             if (frame.lowLight) Text(if (nightVision) "LOW LIGHT // AUTO NIGHT VISION" else "LOW LIGHT", color = Color(0xFFFFB347), fontSize = 11.sp)
             if (zoom > 10f) Text("HIGH ZOOM // DETECTION MAY DEGRADE", color = Color(0xFFFFB347), fontSize = 9.sp)
         }
 
-        if (lockedId != null) TargetPanel071(
-            Modifier.align(Alignment.TopEnd).padding(top = 96.dp, end = 14.dp), zoomBitmap, locked
-        ) { lockedId = null }
+        if (lockedId != null) TargetPanel071(Modifier.align(Alignment.TopEnd).padding(top = 96.dp, end = 14.dp), zoomBitmap, locked) { lockedId = null }
 
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp, start = 8.dp, end = 8.dp),
@@ -196,9 +186,7 @@ private fun Scanner071() {
         ) {
             Quick071("LOCK", frame.targets.isNotEmpty()) { lockedId = nearest071(frame.targets)?.trackingId }
             Quick071("M-LOCK", frame.targets.any { speed071(it) > .015f }) { lockedId = fastest071(frame.targets)?.trackingId }
-            Quick071("F:${filter.title}", true, selected = true) {
-                lockedId = null; trails = emptyMap(); filter = filter.next()
-            }
+            Quick071("F:${filter.title}", true, selected = true) { lockedId = null; trails = emptyMap(); filter = filter.next() }
             Quick071(fmtZoom071(zoom), true, selected = zoom != 1f) { zoom = 1f.coerceIn(minZoom, maxZoom) }
             Quick071("SET", true, selected = settingsOpen) { settingsOpen = !settingsOpen }
         }
@@ -208,19 +196,10 @@ private fun Scanner071() {
             exposure = exposure, gain = gain, monochrome = monochrome, autoNv = autoNv,
             profile = profile, trailsEnabled = trailsEnabled, trailsPresent = trails.isNotEmpty(),
             motionDetectionEnabled = motionDetectionEnabled,
-            onClose = { settingsOpen = false },
-            onExposure = { exposure = it },
-            onGain = { gain = it },
-            onMonochrome = { monochrome = !monochrome },
-            onAutoNv = { autoNv = !autoNv },
-            onProfile = { profile = profile.next() },
-            onMotionDetection = {
-                motionDetectionEnabled = !motionDetectionEnabled
-                lockedId = null
-                trails = emptyMap()
-            },
-            onTrails = { trailsEnabled = !trailsEnabled; if (!trailsEnabled) trails = emptyMap() },
-            onClear = { trails = emptyMap() }
+            onClose = { settingsOpen = false }, onExposure = { exposure = it }, onGain = { gain = it },
+            onMonochrome = { monochrome = !monochrome }, onAutoNv = { autoNv = !autoNv }, onProfile = { profile = profile.next() },
+            onMotionDetection = { motionDetectionEnabled = !motionDetectionEnabled; lockedId = null; trails = emptyMap() },
+            onTrails = { trailsEnabled = !trailsEnabled; if (!trailsEnabled) trails = emptyMap() }, onClear = { trails = emptyMap() }
         )
     }
 }
@@ -234,15 +213,8 @@ private fun Settings071(
     onMonochrome: () -> Unit, onAutoNv: () -> Unit, onProfile: () -> Unit,
     onMotionDetection: () -> Unit, onTrails: () -> Unit, onClear: () -> Unit
 ) {
-    Box(
-        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(226.dp)
-            .background(Color.Black.copy(alpha = .90f)).border(1.dp, H071.copy(alpha = .65f))
-    ) {
-        Column(
-            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                .padding(top = 96.dp, start = 12.dp, end = 12.dp, bottom = 100.dp),
-            verticalArrangement = Arrangement.spacedBy(9.dp)
-        ) {
+    Box(modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(226.dp).background(Color.Black.copy(alpha = .90f)).border(1.dp, H071.copy(alpha = .65f))) {
+        Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 96.dp, start = 12.dp, end = 12.dp, bottom = 100.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             Text("SETTINGS", color = H071, fontSize = 15.sp)
             Text("ZOOM ${fmtZoom071(zoom)}", color = Color.White, fontSize = 11.sp)
             Text("RANGE ${fmtZoom071(minZoom)} — ${fmtZoom071(maxZoom)}", color = Color.White.copy(alpha = .55f), fontSize = 9.sp)
@@ -252,47 +224,32 @@ private fun Settings071(
                 Chip071("EV ${if (exposure >= 0) "+" else ""}$exposure", true) { onExposure(0) }
                 Chip071("EV +", true) { onExposure((exposure + 1).coerceAtMost(6)) }
             }
-            Chip071("GAIN ${String.format(Locale.US, "%.1f", gain)}x", true, gain > 1.01f) {
-                onGain(when { gain < 1.2f -> 1.35f; gain < 1.5f -> 1.70f; gain < 2f -> 2.20f; else -> 1f })
-            }
+            Chip071("GAIN ${String.format(Locale.US, "%.1f", gain)}x", true, gain > 1.01f) { onGain(when { gain < 1.2f -> 1.35f; gain < 1.5f -> 1.70f; gain < 2f -> 2.20f; else -> 1f }) }
             Chip071(if (monochrome) "B/W ON" else "B/W OFF", true, monochrome, onClick = onMonochrome)
             Chip071(if (autoNv) "AUTO NIGHT VISION ON" else "AUTO NIGHT VISION OFF", true, autoNv, onClick = onAutoNv)
-            Chip071("PROFILE ${profile.title}", true, onClick = onProfile)
-            Chip071(
-                if (motionDetectionEnabled) "MOTION DETECTION ON" else "MOTION DETECTION OFF",
-                true,
-                motionDetectionEnabled,
-                onClick = onMotionDetection
-            )
+            Text("PERFORMANCE", color = H071.copy(alpha=.72f), fontSize = 8.sp)
+            Chip071(profile.title, true, profile != TrackingProfile.BALANCED, onClick = onProfile)
+            Text(when(profile){TrackingProfile.SMOOTH->"LOW POWER // LONG YOLO IDLE";TrackingProfile.RESPONSIVE->"MAX YOLO // MINIMUM LATENCY";else->"ADAPTIVE YOLO // HYBRID TRACK"}, color = Color.White.copy(alpha=.48f), fontSize=8.sp)
+            Chip071(if (motionDetectionEnabled) "MOTION DETECTION ON" else "MOTION DETECTION OFF", true, motionDetectionEnabled, onClick = onMotionDetection)
             Chip071(if (trailsEnabled) "MOTION TRAIL ON" else "MOTION TRAIL OFF", true, trailsEnabled, onClick = onTrails)
             Chip071("CLEAR TRAILS", trailsPresent, onClick = onClear)
+            Text("HUD: VECTOR + LEAD + RADAR", color = H071.copy(alpha = .7f), fontSize = 8.sp)
             Text("ISP: SHARPEN + DNR + STABILIZATION", color = H071.copy(alpha = .7f), fontSize = 8.sp)
         }
-        Box(
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = 42.dp, end = 12.dp)
-                .border(1.dp, H071, RoundedCornerShape(10.dp))
-                .background(Color.Black.copy(alpha = .92f), RoundedCornerShape(10.dp))
-                .clickable(onClick = onClose).padding(horizontal = 18.dp, vertical = 12.dp)
-        ) { Text("CLOSE", color = H071, fontSize = 11.sp) }
+        Box(modifier = Modifier.align(Alignment.TopEnd).padding(top = 42.dp, end = 12.dp).border(1.dp, H071, RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = .92f), RoundedCornerShape(10.dp)).clickable(onClick = onClose).padding(horizontal = 18.dp, vertical = 12.dp)) { Text("CLOSE", color = H071, fontSize = 11.sp) }
     }
 }
 
 @Composable
 private fun Quick071(text: String, enabled: Boolean, selected: Boolean = false, onClick: () -> Unit) {
     val c = when { !enabled -> Color.Gray; selected -> H071; else -> Color.White.copy(alpha = .82f) }
-    Box(
-        Modifier.border(1.dp, c, RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = .75f), RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 7.dp, vertical = 9.dp)
-    ) { Text(text, color = c, fontSize = 8.sp) }
+    Box(Modifier.border(1.dp, c, RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = .75f), RoundedCornerShape(8.dp)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 7.dp, vertical = 9.dp)) { Text(text, color = c, fontSize = 8.sp) }
 }
 
 @Composable
 private fun Chip071(text: String, enabled: Boolean, selected: Boolean = false, onClick: () -> Unit) {
     val c = when { !enabled -> Color.Gray; selected -> H071; else -> Color.White.copy(alpha = .82f) }
-    Box(
-        Modifier.border(1.dp, c, RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = .72f), RoundedCornerShape(8.dp))
-            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 10.dp, vertical = 9.dp)
-    ) { Text(text, color = c, fontSize = 9.sp) }
+    Box(Modifier.border(1.dp, c, RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = .72f), RoundedCornerShape(8.dp)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 10.dp, vertical = 9.dp)) { Text(text, color = c, fontSize = 9.sp) }
 }
 
 @Composable
@@ -320,43 +277,28 @@ private fun Camera071(
     LaunchedEffect(camera, zoom) {
         val c = camera ?: return@LaunchedEffect
         val state = c.cameraInfo.zoomState.value
-        val min = state?.minZoomRatio ?: 1f
-        val max = state?.maxZoomRatio ?: 1f
-        onZoomRange(min, max)
-        c.cameraControl.setZoomRatio(zoom.coerceIn(min, max))
+        val min = state?.minZoomRatio ?: 1f; val max = state?.maxZoomRatio ?: 1f
+        onZoomRange(min, max); c.cameraControl.setZoomRatio(zoom.coerceIn(min, max))
     }
 
     LaunchedEffect(camera, exposure) {
         val c = camera ?: return@LaunchedEffect
         val state = c.cameraInfo.exposureState
-        if (state.isExposureCompensationSupported) {
-            val r = state.exposureCompensationRange
-            c.cameraControl.setExposureCompensationIndex(exposure.coerceIn(r.lower, r.upper))
-        }
+        if (state.isExposureCompensationSupported) { val r = state.exposureCompensationRange; c.cameraControl.setExposureCompensationIndex(exposure.coerceIn(r.lower, r.upper)) }
     }
 
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            var previewUseCase: Preview? = null
-            var analysisUseCase: ImageAnalysis? = null
+            var previewUseCase: Preview? = null; var analysisUseCase: ImageAnalysis? = null
             PreviewView(ctx).apply {
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-                implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                onPreview(this)
-
+                scaleType = PreviewView.ScaleType.FILL_CENTER; implementationMode = PreviewView.ImplementationMode.COMPATIBLE; onPreview(this)
                 fun syncTargetRotation() {
                     val currentRotation = display?.rotation ?: Surface.ROTATION_0
-                    if (previewUseCase?.targetRotation != currentRotation) {
-                        previewUseCase?.targetRotation = currentRotation
-                    }
-                    if (analysisUseCase?.targetRotation != currentRotation) {
-                        analysisUseCase?.targetRotation = currentRotation
-                    }
+                    if (previewUseCase?.targetRotation != currentRotation) previewUseCase?.targetRotation = currentRotation
+                    if (analysisUseCase?.targetRotation != currentRotation) analysisUseCase?.targetRotation = currentRotation
                 }
-
                 addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncTargetRotation() }
-
                 val future = ProcessCameraProvider.getInstance(context)
                 future.addListener({
                     val p = future.get(); provider = p
@@ -364,22 +306,15 @@ private fun Camera071(
                     val targetRotation = display?.rotation ?: Surface.ROTATION_0
                     val pb = Preview.Builder().setTargetRotation(targetRotation)
                     CameraEnhancements.configurePreview(pb, selectedInfo, sharpen = true, denoise = true, stabilization = true)
-                    val preview = pb.build().also { it.setSurfaceProvider(surfaceProvider) }
-                    previewUseCase = preview
-                    val ab = ImageAnalysis.Builder().setTargetResolution(android.util.Size(640, 480))
-                        .setTargetRotation(targetRotation)
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    val preview = pb.build().also { it.setSurfaceProvider(surfaceProvider) }; previewUseCase = preview
+                    val ab = ImageAnalysis.Builder().setTargetResolution(android.util.Size(640, 480)).setTargetRotation(targetRotation).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     CameraEnhancements.configureAnalysis(ab, sharpen = true, denoise = true)
-                    val analysis = ab.build().also { it.setAnalyzer(analysisExecutor, analyzer) }
-                    analysisUseCase = analysis
-                    p.unbindAll()
-                    camera = p.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-                    syncTargetRotation()
+                    val analysis = ab.build().also { it.setAnalyzer(analysisExecutor, analyzer) }; analysisUseCase = analysis
+                    p.unbindAll(); camera = p.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis); syncTargetRotation()
                     camera?.cameraInfo?.zoomState?.value?.let { onZoomRange(it.minZoomRatio, it.maxZoomRatio) }
                 }, mainExecutor)
             }
-        },
-        update = { applyFilter071(it, monochrome, gain, nightVision) }
+        }, update = { applyFilter071(it, monochrome, gain, nightVision) }
     )
     DisposableEffect(Unit) { onDispose { provider?.unbindAll(); analyzer.close(); analysisExecutor.shutdown() } }
 }
@@ -387,120 +322,84 @@ private fun Camera071(
 private fun applyFilter071(preview: PreviewView, monochrome: Boolean, gain: Float, nightVision: Boolean) {
     val g = gain.coerceIn(1f, 2.4f)
     val matrix = when {
-        nightVision -> ColorMatrix(floatArrayOf(
-            .04f*g,.08f*g,.02f*g,0f,0f, .30f*g,.88f*g,.18f*g,0f,4f,
-            .03f*g,.10f*g,.03f*g,0f,0f, 0f,0f,0f,1f,0f))
-        monochrome -> ColorMatrix(floatArrayOf(
-            .299f*g,.587f*g,.114f*g,0f,0f, .299f*g,.587f*g,.114f*g,0f,0f,
-            .299f*g,.587f*g,.114f*g,0f,0f, 0f,0f,0f,1f,0f))
+        nightVision -> ColorMatrix(floatArrayOf(.04f*g,.08f*g,.02f*g,0f,0f, .30f*g,.88f*g,.18f*g,0f,4f, .03f*g,.10f*g,.03f*g,0f,0f, 0f,0f,0f,1f,0f))
+        monochrome -> ColorMatrix(floatArrayOf(.299f*g,.587f*g,.114f*g,0f,0f, .299f*g,.587f*g,.114f*g,0f,0f, .299f*g,.587f*g,.114f*g,0f,0f, 0f,0f,0f,1f,0f))
         else -> ColorMatrix(floatArrayOf(g,0f,0f,0f,0f, 0f,g,0f,0f,0f, 0f,0f,g,0f,0f, 0f,0f,0f,1f,0f))
     }
     val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { colorFilter = ColorMatrixColorFilter(matrix) }
-    preview.setLayerType(View.LAYER_TYPE_HARDWARE, p)
-    if (preview.childCount > 0) preview.getChildAt(0)?.setLayerType(View.LAYER_TYPE_HARDWARE, p)
+    preview.setLayerType(View.LAYER_TYPE_HARDWARE, p); if (preview.childCount > 0) preview.getChildAt(0)?.setLayerType(View.LAYER_TYPE_HARDWARE, p)
 }
 
 @Composable
-private fun Hud071(
-    frame: DetectionFrame, lockedId: Int?, trails: Map<Int, List<Trail071>>,
-    minZoom: Float, maxZoom: Float, onTargetTap: (Int) -> Unit, onZoomGesture: (Float) -> Unit
-) {
-    val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); textSize = 22f } }
+private fun Hud071(frame: DetectionFrame, lockedId: Int?, trails: Map<Int, List<Trail071>>, minZoom: Float, maxZoom: Float, onTargetTap: (Int) -> Unit, onZoomGesture: (Float) -> Unit) {
+    val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD); textSize = 20f } }
     val latestZoomHandler by rememberUpdatedState(onZoomGesture)
-    Canvas(
-        Modifier.fillMaxSize()
-            .pointerInput(frame.targets, frame.imageWidth, frame.imageHeight, lockedId) {
-                detectTapGestures { tap ->
-                    frame.targets.asReversed().firstOrNull {
-                        rect071(it.normalizedBox, size.width.toFloat(), size.height.toFloat(), frame.imageWidth, frame.imageHeight).contains(tap.x, tap.y)
-                    }?.let { onTargetTap(it.trackingId) }
-                }
-            }
-            .pointerInput(minZoom, maxZoom) {
-                detectTransformGestures { _, _, zoomChange, _ ->
-                    if (zoomChange > 0f && zoomChange != 1f) {
-                        val accelerated = zoomChange.toDouble().pow(1.8).toFloat().coerceIn(.70f, 1.45f)
-                        latestZoomHandler(accelerated)
-                    }
-                }
-            }
-    ) {
-        drawTrails071(trails, frame, lockedId)
-        drawReticle071()
+    Canvas(Modifier.fillMaxSize().pointerInput(frame.targets, frame.imageWidth, frame.imageHeight, lockedId) {
+        detectTapGestures { tap -> frame.targets.asReversed().firstOrNull { rect071(it.normalizedBox, size.width.toFloat(), size.height.toFloat(), frame.imageWidth, frame.imageHeight).contains(tap.x, tap.y) }?.let { onTargetTap(it.trackingId) } }
+    }.pointerInput(minZoom, maxZoom) {
+        detectTransformGestures { _, _, zoomChange, _ -> if (zoomChange > 0f && zoomChange != 1f) latestZoomHandler(zoomChange.toDouble().pow(1.8).toFloat().coerceIn(.70f, 1.45f)) }
+    }) {
+        drawTacticalFrame071(); drawTrails071(trails, frame, lockedId); drawReticle071()
         val cx = size.width/2f; val cy = size.height/2f
         frame.targets.forEach { t ->
             val r = rect071(t.normalizedBox, size.width, size.height, frame.imageWidth, frame.imageHeight)
-            val isLocked = t.trackingId == lockedId
-            val c = if (isLocked) Color(0xFFFFD64A) else status071(t.status)
-            val dashed = t.status == TrackStatus.PREDICTED || t.status == TrackStatus.LOST
-            drawRect(c, Offset(r.left,r.top), Size(r.width(),r.height()), style = Stroke(if (isLocked) 5f else 3f,
-                pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(16f,10f)) else null))
-            if (isLocked) drawLine(c.copy(alpha=.7f), Offset(cx,cy), Offset(r.centerX(),r.centerY()),2f)
-            val pct = if (t.confidence > 0f) " ${(t.confidence*100).toInt()}%" else ""
-            paint.color = c.toArgb()
-            drawContext.canvas.nativeCanvas.drawText("${t.label}$pct // #${t.trackingId}", r.left, (r.top-8f).coerceAtLeast(30f), paint)
+            val isLocked = t.trackingId == lockedId; val c = if (isLocked) Color(0xFFFFD64A) else status071(t.status)
+            drawTacticalBox071(r,c,t.status,isLocked)
+            val center=Offset(r.centerX(),r.centerY()); drawCircle(c.copy(alpha=.72f),3.5f,center)
+            val sp=speed071(t)
+            if(sp>.008f) drawVelocityVector071(t,r,c,frame)
+            if(isLocked){drawLine(c.copy(alpha=.48f),Offset(cx,cy),center,1.5f);drawCircle(c.copy(alpha=.45f),max(r.width(),r.height())*.58f,center,style=Stroke(1.4f))}
+            val pct=if(t.confidence>0f)" ${(t.confidence*100).toInt()}%" else "";paint.color=c.toArgb()
+            drawContext.canvas.nativeCanvas.drawText("${t.label}$pct // #${t.trackingId}",r.left,(r.top-7f).coerceAtLeast(28f),paint)
+            if(sp>.008f){paint.textSize=15f;drawContext.canvas.nativeCanvas.drawText("V ${String.format(Locale.US,"%.03f",sp)}",r.left,(r.bottom+18f).coerceAtMost(size.height-8f),paint);paint.textSize=20f}
         }
         drawRadar071(frame.targets, lockedId)
     }
 }
 
-private fun DrawScope.drawReticle071() {
-    val cx=size.width/2f; val cy=size.height/2f
-    drawCircle(H071.copy(alpha=.7f),60f,Offset(cx,cy),style=Stroke(2f)); drawCircle(H071,6f,Offset(cx,cy),style=Stroke(2f))
-    drawLine(H071,Offset(cx-95f,cy),Offset(cx-16f,cy),2f); drawLine(H071,Offset(cx+16f,cy),Offset(cx+95f,cy),2f)
-    drawLine(H071,Offset(cx,cy-95f),Offset(cx,cy-16f),2f); drawLine(H071,Offset(cx,cy+16f),Offset(cx,cy+95f),2f)
+private fun DrawScope.drawTacticalFrame071(){
+    val c=H071.copy(alpha=.62f);val m=24f;val l=46f
+    drawLine(c,Offset(m,m),Offset(m+l,m),2f);drawLine(c,Offset(m,m),Offset(m,m+l),2f)
+    drawLine(c,Offset(size.width-m-l,m),Offset(size.width-m,m),2f);drawLine(c,Offset(size.width-m,m),Offset(size.width-m,m+l),2f)
+    drawLine(c,Offset(m,size.height-m),Offset(m+l,size.height-m),2f);drawLine(c,Offset(m,size.height-m-l),Offset(m,size.height-m),2f)
+    drawLine(c,Offset(size.width-m-l,size.height-m),Offset(size.width-m,size.height-m),2f);drawLine(c,Offset(size.width-m,size.height-m-l),Offset(size.width-m,size.height-m),2f)
+    val y=size.height*.18f;drawLine(c.copy(alpha=.25f),Offset(size.width*.18f,y),Offset(size.width*.82f,y),1f,pathEffect=PathEffect.dashPathEffect(floatArrayOf(10f,14f)))
 }
 
-private fun DrawScope.drawTrails071(trails: Map<Int,List<Trail071>>, frame: DetectionFrame, lockedId: Int?) {
-    val now=SystemClock.elapsedRealtime()
-    trails.forEach { (id,pts) ->
-        if (pts.size<2) return@forEach
-        val c=if(id==lockedId) Color(0xFFFFD64A) else H071
-        for(i in 1 until pts.size) {
-            val a=pts[i-1]; val b=pts[i]; val age=now-b.at
-            if(age>TRAIL_AGE_071) continue
-            val alpha=(1f-age.toFloat()/TRAIL_AGE_071).coerceIn(.08f,.82f)
-            drawLine(c.copy(alpha=alpha), point071(a.x,a.y,size.width,size.height,frame.imageWidth,frame.imageHeight),
-                point071(b.x,b.y,size.width,size.height,frame.imageWidth,frame.imageHeight), if(id==lockedId)5f else 3f)
-        }
-    }
+private fun DrawScope.drawTacticalBox071(r:RectF,c:Color,status:TrackStatus,locked:Boolean){
+    if(status==TrackStatus.PREDICTED||status==TrackStatus.LOST){drawRect(c.copy(alpha=.72f),Offset(r.left,r.top),Size(r.width(),r.height()),style=Stroke(if(locked)3.5f else 2f,pathEffect=PathEffect.dashPathEffect(floatArrayOf(13f,9f))));return}
+    val len=min(28f,min(r.width(),r.height())*.30f).coerceAtLeast(9f);val w=if(locked)4f else 2.6f
+    drawLine(c,Offset(r.left,r.top),Offset(r.left+len,r.top),w);drawLine(c,Offset(r.left,r.top),Offset(r.left,r.top+len),w)
+    drawLine(c,Offset(r.right-len,r.top),Offset(r.right,r.top),w);drawLine(c,Offset(r.right,r.top),Offset(r.right,r.top+len),w)
+    drawLine(c,Offset(r.left,r.bottom),Offset(r.left+len,r.bottom),w);drawLine(c,Offset(r.left,r.bottom-len),Offset(r.left,r.bottom),w)
+    drawLine(c,Offset(r.right-len,r.bottom),Offset(r.right,r.bottom),w);drawLine(c,Offset(r.right,r.bottom-len),Offset(r.right,r.bottom),w)
 }
 
-private fun DrawScope.drawRadar071(targets: List<DetectionTarget>, lockedId: Int?) {
-    val radius=58f; val center=Offset(size.width-76f,size.height-130f)
-    drawCircle(Color.Black.copy(alpha=.55f),radius+8f,center); drawCircle(H071,radius,center,style=Stroke(2f)); drawCircle(H071.copy(alpha=.5f),radius/2,center,style=Stroke(1.5f))
-    targets.forEach { t ->
-        val x=center.x+(t.normalizedBox.centerX()-.5f)*radius*1.6f; val y=center.y+(t.normalizedBox.centerY()-.5f)*radius*1.6f
-        drawCircle(if(t.trackingId==lockedId)Color(0xFFFFD64A) else status071(t.status), if(t.trackingId==lockedId)6f else 4f, Offset(x,y))
-    }
+private fun DrawScope.drawVelocityVector071(t:DetectionTarget,r:RectF,c:Color,frame:DetectionFrame){
+    val start=Offset(r.centerX(),r.centerY());val sx=size.width.coerceAtLeast(1f);val sy=size.height.coerceAtLeast(1f)
+    val dx=(t.velocityX*sx*.38f).coerceIn(-150f,150f);val dy=(t.velocityY*sy*.38f).coerceIn(-150f,150f)
+    if(hypot(dx,dy)<7f)return
+    val end=Offset((start.x+dx).coerceIn(8f,size.width-8f),(start.y+dy).coerceIn(8f,size.height-8f));drawLine(c.copy(alpha=.82f),start,end,2f)
+    val a=atan2(end.y-start.y,end.x-start.x);val al=12f
+    drawLine(c.copy(alpha=.82f),end,Offset(end.x-cos(a-.52f)*al,end.y-sin(a-.52f)*al),2f);drawLine(c.copy(alpha=.82f),end,Offset(end.x-cos(a+.52f)*al,end.y-sin(a+.52f)*al),2f)
+    val lead=Offset((start.x+dx*1.55f).coerceIn(10f,size.width-10f),(start.y+dy*1.55f).coerceIn(10f,size.height-10f));drawCircle(c.copy(alpha=.45f),8f,lead,style=Stroke(1.4f));drawLine(c.copy(alpha=.35f),Offset(lead.x-12f,lead.y),Offset(lead.x+12f,lead.y),1f);drawLine(c.copy(alpha=.35f),Offset(lead.x,lead.y-12f),Offset(lead.x,lead.y+12f),1f)
 }
+
+private fun DrawScope.drawReticle071() { val cx=size.width/2f;val cy=size.height/2f;drawCircle(H071.copy(alpha=.55f),60f,Offset(cx,cy),style=Stroke(1.5f));drawCircle(H071,5f,Offset(cx,cy),style=Stroke(1.5f));drawLine(H071,Offset(cx-95f,cy),Offset(cx-16f,cy),1.5f);drawLine(H071,Offset(cx+16f,cy),Offset(cx+95f,cy),1.5f);drawLine(H071,Offset(cx,cy-95f),Offset(cx,cy-16f),1.5f);drawLine(H071,Offset(cx,cy+16f),Offset(cx,cy+95f),1.5f) }
+
+private fun DrawScope.drawTrails071(trails: Map<Int,List<Trail071>>, frame: DetectionFrame, lockedId: Int?) { val now=SystemClock.elapsedRealtime();trails.forEach { (id,pts)->if(pts.size<2)return@forEach;val c=if(id==lockedId)Color(0xFFFFD64A)else H071;for(i in 1 until pts.size){val a=pts[i-1];val b=pts[i];val age=now-b.at;if(age>TRAIL_AGE_071)continue;val alpha=(1f-age.toFloat()/TRAIL_AGE_071).coerceIn(.08f,.72f);drawLine(c.copy(alpha=alpha),point071(a.x,a.y,size.width,size.height,frame.imageWidth,frame.imageHeight),point071(b.x,b.y,size.width,size.height,frame.imageWidth,frame.imageHeight),if(id==lockedId)4f else 2f)}} }
+
+private fun DrawScope.drawRadar071(targets: List<DetectionTarget>, lockedId: Int?) { val radius=58f;val center=Offset(size.width-76f,size.height-130f);drawCircle(Color.Black.copy(alpha=.55f),radius+8f,center);drawCircle(H071,radius,center,style=Stroke(1.8f));drawCircle(H071.copy(alpha=.4f),radius/2,center,style=Stroke(1f));drawLine(H071.copy(alpha=.32f),Offset(center.x-radius,center.y),Offset(center.x+radius,center.y),1f);drawLine(H071.copy(alpha=.32f),Offset(center.x,center.y-radius),Offset(center.x,center.y+radius),1f);targets.forEach{t->val x=center.x+(t.normalizedBox.centerX()-.5f)*radius*1.6f;val y=center.y+(t.normalizedBox.centerY()-.5f)*radius*1.6f;drawCircle(if(t.trackingId==lockedId)Color(0xFFFFD64A)else status071(t.status),if(t.trackingId==lockedId)5f else 3.5f,Offset(x,y))} }
 
 @Composable
-private fun TargetPanel071(modifier: Modifier, bitmap: ImageBitmap?, target: DetectionTarget?, onUnlock: () -> Unit) {
-    Column(modifier.width(170.dp).background(Color.Black.copy(alpha=.8f)).border(1.dp,status071(target?.status)).clickable(onClick=onUnlock).padding(5.dp)) {
-        Box(Modifier.fillMaxWidth().height(110.dp).background(Color.Black), contentAlignment=Alignment.Center) {
-            if(bitmap!=null) Image(bitmap,"Locked target",Modifier.fillMaxSize(),contentScale=ContentScale.Crop) else Text("TARGET LOST",color=Color(0xFFFF5353),fontSize=10.sp)
-        }
-        Text("${target?.label ?: "TARGET"} #${target?.trackingId ?: "--"}",color=status071(target?.status),fontSize=9.sp,modifier=Modifier.padding(top=4.dp))
-    }
-}
+private fun TargetPanel071(modifier: Modifier, bitmap: ImageBitmap?, target: DetectionTarget?, onUnlock: () -> Unit) { Column(modifier.width(170.dp).background(Color.Black.copy(alpha=.8f)).border(1.dp,status071(target?.status)).clickable(onClick=onUnlock).padding(5.dp)) { Box(Modifier.fillMaxWidth().height(110.dp).background(Color.Black),contentAlignment=Alignment.Center){if(bitmap!=null)Image(bitmap,"Locked target",Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Text("TARGET LOST",color=Color(0xFFFF5353),fontSize=10.sp)};Text("${target?.label ?: "TARGET"} #${target?.trackingId ?: "--"}",color=status071(target?.status),fontSize=9.sp,modifier=Modifier.padding(top=4.dp)) } }
 
-private fun updateTrails071(current: Map<Int,List<Trail071>>, frame: DetectionFrame): Map<Int,List<Trail071>> {
-    val now=SystemClock.elapsedRealtime(); val next=current.mapValues{(_,p)->p.filter{now-it.at<=TRAIL_AGE_071}}.filterValues{it.isNotEmpty()}.toMutableMap()
-    frame.targets.forEach { t ->
-        if(t.status==TrackStatus.LOST) return@forEach
-        if(speed071(t)<.006f && next[t.trackingId].isNullOrEmpty()) return@forEach
-        val p=Trail071(t.normalizedBox.centerX(),t.normalizedBox.centerY(),now); val old=next[t.trackingId].orEmpty(); val last=old.lastOrNull()
-        if(last==null || hypot(p.x-last.x,p.y-last.y)>=.0045f) next[t.trackingId]=(old+p).takeLast(TRAIL_POINTS_071)
-    }
-    return next
-}
-
+private fun updateTrails071(current: Map<Int,List<Trail071>>, frame: DetectionFrame): Map<Int,List<Trail071>> { val now=SystemClock.elapsedRealtime();val next=current.mapValues{(_,p)->p.filter{now-it.at<=TRAIL_AGE_071}}.filterValues{it.isNotEmpty()}.toMutableMap();frame.targets.forEach{t->if(t.status==TrackStatus.LOST)return@forEach;if(speed071(t)<.006f&&next[t.trackingId].isNullOrEmpty())return@forEach;val p=Trail071(t.normalizedBox.centerX(),t.normalizedBox.centerY(),now);val old=next[t.trackingId].orEmpty();val last=old.lastOrNull();if(last==null||hypot(p.x-last.x,p.y-last.y)>=.0045f)next[t.trackingId]=(old+p).takeLast(TRAIL_POINTS_071)};return next }
 private fun status071(s:TrackStatus?):Color=when(s){TrackStatus.PREDICTED->Color(0xFFFFA33C);TrackStatus.LOST->Color(0xFFFF5353);TrackStatus.ACQUIRING->Color(0xFF7CEBFF);else->H071}
 private fun speed071(t:DetectionTarget)=hypot(t.velocityX,t.velocityY)
 private fun fastest071(ts:List<DetectionTarget>)=ts.filter{it.status!=TrackStatus.LOST}.maxByOrNull(::speed071)?.takeIf{speed071(it)>.015f}
 private fun nearest071(ts:List<DetectionTarget>)=ts.minByOrNull{hypot(it.normalizedBox.centerX()-.5f,it.normalizedBox.centerY()-.5f)}
-private fun fmtZoom071(z:Float)=if(z<10f)String.format(Locale.US,"%.1fx",z) else String.format(Locale.US,"%.0fx",z)
+private fun fmtZoom071(z:Float)=if(z<10f)String.format(Locale.US,"%.1fx",z)else String.format(Locale.US,"%.0fx",z)
 private fun point071(x:Float,y:Float,vw:Float,vh:Float,iw:Int,ih:Int):Offset{if(iw<=0||ih<=0)return Offset.Zero;val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;val dh=ih*s;return Offset((vw-dw)/2+x*dw,(vh-dh)/2+y*dh)}
 private fun rect071(b:RectF,vw:Float,vh:Float,iw:Int,ih:Int):RectF{if(iw<=0||ih<=0)return RectF();val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;val dh=ih*s;val ox=(vw-dw)/2;val oy=(vh-dh)/2;return RectF(ox+b.left*dw,oy+b.top*dh,ox+b.right*dw,oy+b.bottom*dh)}
 private fun crop071(source:Bitmap,target:DetectionTarget,frame:DetectionFrame):Bitmap?{val r=rect071(target.normalizedBox,source.width.toFloat(),source.height.toFloat(),frame.imageWidth,frame.imageHeight);val mx=r.width()*.16f;val my=r.height()*.16f;val l=(r.left-mx).toInt().coerceIn(0,source.width-1);val t=(r.top-my).toInt().coerceIn(0,source.height-1);val rr=(r.right+mx).toInt().coerceIn(l+1,source.width);val bb=(r.bottom+my).toInt().coerceIn(t+1,source.height);return runCatching{Bitmap.createBitmap(source,l,t,rr-l,bb-t)}.getOrNull()}
