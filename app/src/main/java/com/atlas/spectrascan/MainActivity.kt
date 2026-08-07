@@ -173,9 +173,13 @@ private fun ScannerScreen() {
                 .padding(top = 14.dp, start = 14.dp, end = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("SPECTRASCAN 0.3.1 // ${mode.title}", color = mode.tint, fontSize = 15.sp)
             Text(
-                "DET ${frame.inferenceFps.toString().padStart(2, '0')} FPS  " +
+                "SPECTRASCAN ${BuildConfig.VERSION_NAME} // ${mode.title}",
+                color = mode.tint,
+                fontSize = 15.sp
+            )
+            Text(
+                "YOLO ${frame.inferenceFps.toString().padStart(2, '0')} FPS  " +
                     "${frame.inferenceMs} MS  " +
                     "TARGETS ${frame.targets.size.toString().padStart(2, '0')}  " +
                     "DROP ${frame.rejectedCandidates}",
@@ -184,7 +188,7 @@ private fun ScannerScreen() {
             )
             Text(
                 "$globalStatus  //  ${profile.title}  //  ${frame.targetFilter.title}" +
-                    if (frame.brightTrackerActive) "  //  BRT" else "  //  ML",
+                    if (frame.brightTrackerActive) "  //  YOLO+BRT" else "  //  YOLO11",
                 color = statusColor(lockedTarget?.status, mode.tint),
                 fontSize = 10.sp
             )
@@ -277,7 +281,7 @@ private fun ControlChip(
 
 @Composable
 private fun CameraPreview(
-    modifier: Modifier = Modifier,
+    modifier: Modifier,
     profile: TrackingProfile,
     targetFilter: TargetFilter,
     onPreviewReady: (PreviewView) -> Unit,
@@ -293,13 +297,8 @@ private fun CameraPreview(
     }
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
 
-    LaunchedEffect(profile) {
-        analyzer.setProfile(profile)
-    }
-
-    LaunchedEffect(targetFilter) {
-        analyzer.setTargetFilter(targetFilter)
-    }
+    LaunchedEffect(profile) { analyzer.setProfile(profile) }
+    LaunchedEffect(targetFilter) { analyzer.setTargetFilter(targetFilter) }
 
     AndroidView(
         modifier = modifier,
@@ -362,25 +361,22 @@ private fun TrackingHud(
             .fillMaxSize()
             .pointerInput(frame.targets, frame.imageWidth, frame.imageHeight, lockedId) {
                 detectTapGestures { tap ->
-                    frame.targets
-                        .asReversed()
-                        .firstOrNull {
-                            mapTargetRect(
-                                it.normalizedBox,
-                                size.width.toFloat(),
-                                size.height.toFloat(),
-                                frame.imageWidth,
-                                frame.imageHeight
-                            ).contains(tap.x, tap.y)
-                        }
-                        ?.let { onTargetTapped(it.trackingId) }
+                    frame.targets.asReversed().firstOrNull {
+                        mapTargetRect(
+                            it.normalizedBox,
+                            size.width.toFloat(),
+                            size.height.toFloat(),
+                            frame.imageWidth,
+                            frame.imageHeight
+                        ).contains(tap.x, tap.y)
+                    }?.let { onTargetTapped(it.trackingId) }
                 }
             }
     ) {
         drawReticle(color)
-
         val cx = size.width / 2f
         val cy = size.height / 2f
+
         frame.targets.forEach { target ->
             val rect = mapTargetRect(
                 target.normalizedBox,
@@ -408,17 +404,12 @@ private fun TrackingHud(
             drawLine(targetColor, Offset(rect.right, rect.bottom), Offset(rect.right, rect.bottom - corner), 7f)
 
             val vectorScale = minOf(size.width, size.height) * 0.18f
-            val motionEnd = Offset(
-                rect.centerX() + target.velocityX * vectorScale,
-                rect.centerY() + target.velocityY * vectorScale
-            )
             if (hypot(target.velocityX, target.velocityY) > 0.015f) {
-                drawLine(
-                    targetColor.copy(alpha = 0.8f),
-                    Offset(rect.centerX(), rect.centerY()),
-                    motionEnd,
-                    3f
+                val motionEnd = Offset(
+                    rect.centerX() + target.velocityX * vectorScale,
+                    rect.centerY() + target.velocityY * vectorScale
                 )
+                drawLine(targetColor.copy(alpha = 0.8f), Offset(rect.centerX(), rect.centerY()), motionEnd, 3f)
                 drawCircle(targetColor, 5f, motionEnd)
             }
 
@@ -429,18 +420,11 @@ private fun TrackingHud(
                     Offset(rect.centerX(), rect.centerY()),
                     2f
                 )
-                drawCircle(
-                    targetColor,
-                    radius = 16f,
-                    center = Offset(rect.centerX(), rect.centerY()),
-                    style = Stroke(3f)
-                )
+                drawCircle(targetColor, 16f, Offset(rect.centerX(), rect.centerY()), style = Stroke(3f))
             }
 
-            val percent = if (target.confidence > 0f) {
-                " ${(target.confidence * 100).toInt()}%"
-            } else ""
-            val source = if (target.fromBrightnessTracker) "BRT" else "ML"
+            val percent = if (target.confidence > 0f) " ${(target.confidence * 100).toInt()}%" else ""
+            val source = if (target.fromBrightnessTracker) "BRT" else "YOLO"
             val label = "${target.status.name} // $source // ${target.label}$percent // #${target.trackingId}"
             labelPaint.color = targetColor.toArgb()
             drawContext.canvas.nativeCanvas.drawText(
@@ -493,16 +477,8 @@ private fun DrawScope.drawRadar(
     targets.forEach { target ->
         val x = center.x + (target.normalizedBox.centerX() - 0.5f) * radius * 1.65f
         val y = center.y + (target.normalizedBox.centerY() - 0.5f) * radius * 1.65f
-        val dotColor = if (target.trackingId == lockedId) {
-            Color(0xFFFFD64A)
-        } else {
-            statusColor(target.status, color)
-        }
-        drawCircle(
-            dotColor,
-            radius = if (target.trackingId == lockedId) 7f else 4f,
-            center = Offset(x, y)
-        )
+        val dotColor = if (target.trackingId == lockedId) Color(0xFFFFD64A) else statusColor(target.status, color)
+        drawCircle(dotColor, if (target.trackingId == lockedId) 7f else 4f, Offset(x, y))
     }
 }
 
@@ -523,10 +499,7 @@ private fun TargetZoomPanel(
             .padding(5.dp)
     ) {
         Box(
-            Modifier
-                .fillMaxWidth()
-                .height(125.dp)
-                .background(Color.Black),
+            Modifier.fillMaxWidth().height(125.dp).background(Color.Black),
             contentAlignment = Alignment.Center
         ) {
             if (bitmap != null) {
@@ -541,8 +514,7 @@ private fun TargetZoomPanel(
             }
         }
         Text(
-            text = "${target?.status?.name ?: "LOST"} // " +
-                "${target?.label ?: "TARGET"} #${target?.trackingId ?: "--"}",
+            text = "${target?.status?.name ?: "LOST"} // ${target?.label ?: "TARGET"} #${target?.trackingId ?: "--"}",
             color = statusColor(target?.status, color),
             fontSize = 10.sp,
             modifier = Modifier.padding(top = 4.dp)
