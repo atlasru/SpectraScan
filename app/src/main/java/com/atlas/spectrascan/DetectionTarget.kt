@@ -22,6 +22,16 @@ enum class TrackingProfile(
     fun next(): TrackingProfile = entries[(ordinal + 1) % entries.size]
 }
 
+enum class TargetFilter(val title: String) {
+    ALL("ALL"),
+    PEOPLE("PEOPLE"),
+    ANIMALS("ANIMALS"),
+    OBJECTS("OBJECTS"),
+    SCREENS("SCREENS");
+
+    fun next(): TargetFilter = entries[(ordinal + 1) % entries.size]
+}
+
 data class DetectionTarget(
     val trackingId: Int,
     val label: String,
@@ -30,7 +40,8 @@ data class DetectionTarget(
     val status: TrackStatus = TrackStatus.ACQUIRING,
     val missingForMs: Long = 0L,
     val velocityX: Float = 0f,
-    val velocityY: Float = 0f
+    val velocityY: Float = 0f,
+    val fromBrightnessTracker: Boolean = false
 )
 
 data class DetectionFrame(
@@ -39,5 +50,7 @@ data class DetectionFrame(
     val imageHeight: Int = 1,
     val inferenceFps: Int = 0,
     val inferenceMs: Long = 0L,
-    val brightTrackerActive: Boolean = false
+    val brightTrackerActive: Boolean = false,
+    val targetFilter: TargetFilter = TargetFilter.ALL,
+    val rejectedCandidates: Int = 0
 )
