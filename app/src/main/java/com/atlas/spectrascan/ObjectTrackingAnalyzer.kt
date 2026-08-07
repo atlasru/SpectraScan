@@ -12,14 +12,13 @@ import kotlin.math.max
 
 class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val onFrame:(DetectionFrame)->Unit):ImageAnalysis.Analyzer,AutoCloseable {
     private val busy=AtomicBoolean(false);private val tracker=HybridTracker();private val motionDetector=MotionFlowDetector();private val semanticFlow=SemanticFlowTracker();private val yoloDetector=lazy{YoloDetector(SpectraScanApplication.appContext)}
-    private var lastResultAt=0L;private var lastYoloAt=0L;private var previousYoloAt=0L;private var lastYoloMs=0L;private var lastYoloFps=0;private var lastTargets:List<DetectionTarget> = emptyList()
+    private var lastResultAt=0L;private var lastYoloAt=0L;private var previousYoloAt=0L;private var lastYoloMs=0L;private var lastYoloFps=0;private var lastTargets:List<DetectionTarget> = emptyList();private var lastZoomGeneration=0L
     @Volatile private var targetFilter=TargetFilter.ALL;@Volatile private var digitalGain=1f;@Volatile private var motionDetectionEnabled=false
     @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false
     fun setProfile(profile:TrackingProfile){tracker.profile=profile}
     fun setTargetFilter(filter:TargetFilter){
         if(targetFilter!=filter){
             targetFilter=filter
-            // First SkyWatch release is deliberately optimized for a fixed phone/camera node.
             skyWatchEnabled=filter==TargetFilter.SKY;stationaryCamera=skyWatchEnabled;motionDetector.setSkyWatch(skyWatchEnabled,stationaryCamera)
             tracker.reset();motionDetector.reset();semanticFlow.reset();lastTargets=emptyList();lastYoloAt=0
         }
@@ -33,13 +32,25 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
         val rotation=imageProxy.imageInfo.rotationDegrees;val orientedWidth=if(rotation==90||rotation==270)imageProxy.height else imageProxy.width;val orientedHeight=if(rotation==90||rotation==270)imageProxy.width else imageProxy.height;val activeFilter=targetFilter
         try{
             val meanLuma=calculateMeanLuma(imageProxy);val lowLight=meanLuma<58;val nightVisionSuggested=meanLuma<40;val now=SystemClock.elapsedRealtime()
+
+            val zoomGeneration=ZoomBoostSignal.generation()
+            val zoomGeometryChanged=zoomGeneration!=lastZoomGeneration
+            if(zoomGeometryChanged){
+                // The previous appearance template belongs to a different field of view.
+                // Keep semantic tracks, but force fresh YOLO geometry immediately.
+                lastZoomGeneration=zoomGeneration;semanticFlow.reset();lastYoloAt=0L
+            }
+            val zoomBoost=ZoomBoostSignal.isActive(now)
+
             val useMotion=motionDetectionEnabled||skyWatchEnabled
             val motionResult=if(useMotion)motionDetector.analyze(imageProxy,rotation) else MotionFlowDetector.Result(emptyList(),0f,0f,false)
-            val flowResult=semanticFlow.track(imageProxy,rotation,now)
+            val flowResult=if(zoomBoost) SemanticFlowTracker.Result(emptyList(),false,0f,false) else semanticFlow.track(imageProxy,rotation,now)
             if(activeFilter==TargetFilter.MOTION&&!skyWatchEnabled){val targets=tracker.update(motionResult.observations,now);lastTargets=targets;dispatchFrame(targets,orientedWidth,orientedHeight,now,false,useMotion&&motionResult.active,false,activeFilter,0,meanLuma,lowLight,nightVisionSuggested,true);return}
 
-            val yoloInterval=adaptiveYoloInterval(meanLuma,flowResult,lastTargets,useMotion&&motionResult.active)
-            val yoloDue=lastYoloAt==0L||flowResult.needsYoloRecheck||now-lastYoloAt>=yoloInterval
+            val yoloInterval=adaptiveYoloInterval(meanLuma,flowResult,lastTargets,useMotion&&motionResult.active,zoomBoost)
+            // During pinch/zoom transitions, do not wait for the normal power-saving scheduler.
+            // The analyzer is single-threaded, so this naturally means "run as fast as the device can infer".
+            val yoloDue=zoomBoost||lastYoloAt==0L||flowResult.needsYoloRecheck||now-lastYoloAt>=yoloInterval
             if(!yoloDue){
                 val observations=mergeLightweightObservations(flowResult.observations,if(useMotion)motionResult.observations else emptyList())
                 val targets=tracker.update(observations,now);lastTargets=targets
@@ -56,12 +67,14 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
             if(useMotion)motionResult.observations.forEach{m->if(observations.none{intersectionOverUnion(it.normalizedBox,m.normalizedBox)>.16f})observations+=m}
             if(brightObservation!=null&&observations.none{intersectionOverUnion(it.normalizedBox,brightObservation.normalizedBox)>.30f})observations+=brightObservation
             val afterYolo=SystemClock.elapsedRealtime();val targets=tracker.update(observations,afterYolo);lastTargets=targets
-            semanticFlow.seed(imageProxy,rotation,targets,afterYolo)
+            // Do not learn appearance while FOV is actively changing; zoom blur/scale changes caused drift in 0.9.0.
+            if(!ZoomBoostSignal.isActive(afterYolo))semanticFlow.seed(imageProxy,rotation,targets,afterYolo)
             dispatchFrame(targets,orientedWidth,orientedHeight,afterYolo,brightObservation!=null,useMotion&&motionResult.active,flowResult.active,activeFilter,rejected,meanLuma,lowLight,nightVisionSuggested,false)
         }catch(_:Throwable){val now=SystemClock.elapsedRealtime();val targets=tracker.update(emptyList(),now);lastTargets=targets;dispatchFrame(targets,orientedWidth,orientedHeight,now,false,false,false,activeFilter,0,255f,false,false,true)}finally{busy.set(false);imageProxy.close()}
     }
 
-    private fun adaptiveYoloInterval(meanLuma:Float,flow:SemanticFlowTracker.Result,targets:List<DetectionTarget>,motionActive:Boolean):Long{
+    private fun adaptiveYoloInterval(meanLuma:Float,flow:SemanticFlowTracker.Result,targets:List<DetectionTarget>,motionActive:Boolean,zoomBoost:Boolean):Long{
+        if(zoomBoost)return 0L
         if(flow.needsYoloRecheck)return if(meanLuma<30)420L else 180L
         if(skyWatchEnabled){
             val base=when{motionActive->260L;targets.any{it.label=="UNKNOWN"}->320L;stationaryCamera->700L;else->520L}
