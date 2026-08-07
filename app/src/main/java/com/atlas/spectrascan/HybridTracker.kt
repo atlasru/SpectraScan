@@ -72,7 +72,7 @@ internal class HybridTracker {
 
         tracks.entries.removeAll { (_, track) ->
             val missingFor = now - track.lastSeenAt
-            if (track.confirmed) missingFor > profile.holdMs else missingFor > 350L
+            if (track.confirmed) missingFor > profile.holdMs else missingFor > 500L
         }
 
         return tracks.values.mapNotNull { track ->
@@ -114,7 +114,7 @@ internal class HybridTracker {
 
     private fun requiredConfirmationHits(track: Track): Int = when {
         track.fromBrightnessTracker -> 2
-        track.label == "HOME GOOD" || track.label == "FASHION GOOD" -> 4
+        track.label in FAST_CONFIRM_LABELS -> 2
         else -> 3
     }
 
@@ -135,10 +135,10 @@ internal class HybridTracker {
             if (track.stableId !in availableIds) return@forEach
             val overlap = intersectionOverUnion(track.box, observation.normalizedBox)
             val distance = centerDistance(track.box, observation.normalizedBox)
-            if (overlap < 0.08f && distance > 0.20f) return@forEach
+            if (overlap < 0.06f && distance > 0.24f) return@forEach
 
             var score = overlap * 1.9f - distance
-            if (track.label == observation.label) score += 0.20f
+            if (track.label == observation.label) score += 0.25f
             if (track.fromBrightnessTracker == observation.fromBrightnessTracker) score += 0.10f
             if (score > bestScore) {
                 bestScore = score
@@ -149,7 +149,7 @@ internal class HybridTracker {
     }
 
     private fun updateObservedTrack(track: Track, observation: RawObservation, now: Long) {
-        val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.5f)
+        val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.6f)
         val previousCenterX = track.box.centerX()
         val previousCenterY = track.box.centerY()
         val measuredVelocityX = (observation.normalizedBox.centerX() - previousCenterX) / dtSeconds
@@ -213,4 +213,11 @@ internal class HybridTracker {
         a.centerX() - b.centerX(),
         a.centerY() - b.centerY()
     )
+
+    private companion object {
+        val FAST_CONFIRM_LABELS = setOf(
+            "PERSON", "CELL PHONE", "TV", "LAPTOP", "REMOTE", "CLOCK",
+            "CAT", "DOG", "BIRD", "HORSE", "SHEEP", "COW", "ELEPHANT", "BEAR", "ZEBRA", "GIRAFFE"
+        )
+    }
 }
