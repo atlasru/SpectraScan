@@ -16,6 +16,21 @@ android {
         versionName = "0.3.1"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("spectrascan-debug.keystore")
+            storePassword = "spectrascan"
+            keyAlias = "spectrascan"
+            keyPassword = "spectrascan"
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
