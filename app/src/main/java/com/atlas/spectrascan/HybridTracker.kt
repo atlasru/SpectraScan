@@ -8,7 +8,8 @@ internal data class RawObservation(
     val label: String,
     val confidence: Float,
     val normalizedBox: RectF,
-    val fromBrightnessTracker: Boolean = false
+    val fromBrightnessTracker: Boolean = false,
+    val fromMotionTracker: Boolean = false
 )
 
 internal class HybridTracker {
@@ -28,7 +29,8 @@ internal class HybridTracker {
         var hits: Int,
         var consecutiveHits: Int,
         var confirmed: Boolean,
-        var fromBrightnessTracker: Boolean
+        var fromBrightnessTracker: Boolean,
+        var fromMotionTracker: Boolean
     )
 
     private val tracks = linkedMapOf<Int, Track>()
@@ -55,7 +57,8 @@ internal class HybridTracker {
                     hits = 1,
                     consecutiveHits = 1,
                     confirmed = false,
-                    fromBrightnessTracker = observation.fromBrightnessTracker
+                    fromBrightnessTracker = observation.fromBrightnessTracker,
+                    fromMotionTracker = observation.fromMotionTracker
                 )
             } else {
                 unmatchedTrackIds.remove(matchingTrack.stableId)
@@ -101,7 +104,8 @@ internal class HybridTracker {
                 missingForMs = missingFor,
                 velocityX = track.velocityX,
                 velocityY = track.velocityY,
-                fromBrightnessTracker = track.fromBrightnessTracker
+                fromBrightnessTracker = track.fromBrightnessTracker,
+                fromMotionTracker = track.fromMotionTracker
             )
         }.sortedBy { it.trackingId }
     }
@@ -113,6 +117,7 @@ internal class HybridTracker {
     }
 
     private fun requiredConfirmationHits(track: Track): Int = when {
+        track.fromMotionTracker -> 2
         track.fromBrightnessTracker -> 2
         track.label in FAST_CONFIRM_LABELS -> 2
         else -> 3
@@ -124,8 +129,7 @@ internal class HybridTracker {
     ): Track? {
         if (observation.sourceTrackingId != null) {
             tracks.values.firstOrNull {
-                it.stableId in availableIds &&
-                    it.sourceTrackingId == observation.sourceTrackingId
+                it.stableId in availableIds && it.sourceTrackingId == observation.sourceTrackingId
             }?.let { return it }
         }
 
@@ -140,6 +144,7 @@ internal class HybridTracker {
             var score = overlap * 1.9f - distance
             if (track.label == observation.label) score += 0.25f
             if (track.fromBrightnessTracker == observation.fromBrightnessTracker) score += 0.10f
+            if (track.fromMotionTracker == observation.fromMotionTracker) score += 0.18f
             if (score > bestScore) {
                 bestScore = score
                 best = track
@@ -159,24 +164,28 @@ internal class HybridTracker {
         track.velocityY = track.velocityY * 0.58f + measuredVelocityY * 0.42f
         track.box = lerpRect(track.box, observation.normalizedBox, profile.smoothing)
         track.sourceTrackingId = observation.sourceTrackingId ?: track.sourceTrackingId
-        track.label = observation.label
-        track.confidence = observation.confidence
+
+        // A semantic YOLO label wins over a generic motion label when both channels converge.
+        if (track.fromMotionTracker && !observation.fromMotionTracker && observation.label != "MOTION") {
+            track.label = observation.label
+        } else if (!track.fromMotionTracker || observation.fromMotionTracker) {
+            track.label = observation.label
+        }
+
+        track.confidence = maxOf(track.confidence * 0.72f, observation.confidence)
         track.lastSeenAt = now
         track.updatedAt = now
         track.hits += 1
         track.consecutiveHits += 1
         track.fromBrightnessTracker = observation.fromBrightnessTracker
+        track.fromMotionTracker = observation.fromMotionTracker
     }
 
     private fun predictMissingTrack(track: Track, now: Long) {
         val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.25f)
         val age = now - track.lastSeenAt
         if (age <= profile.holdMs) {
-            track.box = shiftAndClamp(
-                track.box,
-                track.velocityX * dtSeconds,
-                track.velocityY * dtSeconds
-            )
+            track.box = shiftAndClamp(track.box, track.velocityX * dtSeconds, track.velocityY * dtSeconds)
             track.velocityX *= 0.86f
             track.velocityY *= 0.86f
             track.updatedAt = now
