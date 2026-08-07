@@ -16,7 +16,14 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
     @Volatile private var targetFilter=TargetFilter.ALL;@Volatile private var digitalGain=1f;@Volatile private var motionDetectionEnabled=false
     @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false
     fun setProfile(profile:TrackingProfile){tracker.profile=profile}
-    fun setTargetFilter(filter:TargetFilter){if(targetFilter!=filter){targetFilter=filter;tracker.reset();motionDetector.reset();semanticFlow.reset();lastTargets=emptyList();lastYoloAt=0}}
+    fun setTargetFilter(filter:TargetFilter){
+        if(targetFilter!=filter){
+            targetFilter=filter
+            // First SkyWatch release is deliberately optimized for a fixed phone/camera node.
+            skyWatchEnabled=filter==TargetFilter.SKY;stationaryCamera=skyWatchEnabled;motionDetector.setSkyWatch(skyWatchEnabled,stationaryCamera)
+            tracker.reset();motionDetector.reset();semanticFlow.reset();lastTargets=emptyList();lastYoloAt=0
+        }
+    }
     fun setDigitalGain(gain:Float){digitalGain=gain.coerceIn(1f,2.4f)}
     fun setMotionDetectionEnabled(enabled:Boolean){if(motionDetectionEnabled!=enabled){motionDetectionEnabled=enabled;motionDetector.reset()}}
     fun setSkyWatch(enabled:Boolean,stationary:Boolean){if(skyWatchEnabled!=enabled||stationaryCamera!=stationary){skyWatchEnabled=enabled;stationaryCamera=enabled&&stationary;motionDetector.setSkyWatch(enabled,stationaryCamera);tracker.reset();semanticFlow.reset();lastTargets=emptyList();lastYoloAt=0}}
