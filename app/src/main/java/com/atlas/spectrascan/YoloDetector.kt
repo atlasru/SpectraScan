@@ -34,14 +34,13 @@ internal class YoloDetector(context: Context) : AutoCloseable {
     }
 
     fun detect(bitmap: Bitmap, filter: TargetFilter): Pair<List<YoloDetection>, Int> {
+        if (filter == TargetFilter.MOTION) return emptyList<YoloDetection>() to 0
         val scaled = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         scaled.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
-        val floatBuffer = ByteBuffer
-            .allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * Float.SIZE_BYTES)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
+        val floatBuffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * Float.SIZE_BYTES)
+            .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
         for (channel in 0..2) {
             for (pixel in pixels) {
@@ -55,12 +54,7 @@ internal class YoloDetector(context: Context) : AutoCloseable {
         }
         floatBuffer.rewind()
 
-        val tensor = OnnxTensor.createTensor(
-            environment,
-            floatBuffer,
-            longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
-        )
-
+        val tensor = OnnxTensor.createTensor(environment, floatBuffer, longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong()))
         var rejected = 0
         val candidates = mutableListOf<YoloDetection>()
         tensor.use { input ->
@@ -83,16 +77,11 @@ internal class YoloDetector(context: Context) : AutoCloseable {
                         val scores = channels[4 + classId] as? FloatArray ?: continue
                         if (i >= scores.size) continue
                         val score = scores[i]
-                        if (score > bestScore) {
-                            bestScore = score
-                            bestClass = classId
-                        }
+                        if (score > bestScore) { bestScore = score; bestClass = classId }
                     }
                     if (bestClass < 0) continue
-
                     val label = COCO_LABELS[bestClass]
-                    val threshold = confidenceThreshold(label)
-                    if (bestScore < threshold || !filterAccepts(label, filter)) {
+                    if (bestScore < confidenceThreshold(label) || !filterAccepts(label, filter)) {
                         if (bestScore >= 0.10f) rejected++
                         continue
                     }
@@ -107,21 +96,11 @@ internal class YoloDetector(context: Context) : AutoCloseable {
                         (cx + width / 2f).coerceIn(0f, 1f),
                         (cy + height / 2f).coerceIn(0f, 1f)
                     )
-                    if (!geometryAccepts(rect, label)) {
-                        rejected++
-                        continue
-                    }
-
-                    candidates += YoloDetection(
-                        classId = bestClass,
-                        label = label.uppercase(),
-                        confidence = bestScore,
-                        normalizedBox = rect
-                    )
+                    if (!geometryAccepts(rect, label)) { rejected++; continue }
+                    candidates += YoloDetection(bestClass, label.uppercase(), bestScore, rect)
                 }
             }
         }
-
         return nonMaxSuppression(candidates) to rejected
     }
 
@@ -139,73 +118,48 @@ internal class YoloDetector(context: Context) : AutoCloseable {
         TargetFilter.ANIMALS -> label in ANIMAL_LABELS
         TargetFilter.SCREENS -> label in SCREEN_LABELS
         TargetFilter.OBJECTS -> label != "person" && label !in ANIMAL_LABELS
+        TargetFilter.MOTION -> false
     }
 
     private fun geometryAccepts(box: RectF, label: String): Boolean {
-        val width = box.width()
-        val height = box.height()
-        val area = width * height
+        val width = box.width(); val height = box.height(); val area = width * height
         if (width <= 0f || height <= 0f) return false
-
-        val minArea = when (label.lowercase()) {
-            "cell phone", "remote", "clock" -> 0.00025f
-            else -> 0.0007f
-        }
+        val minArea = when (label.lowercase()) { "cell phone", "remote", "clock" -> 0.00025f; else -> 0.0007f }
         if (area < minArea) return false
-
-        if (label.equals("person", ignoreCase = true)) {
+        if (label.equals("person", true)) {
             if (width > 0.98f || height > 0.98f || area > 0.86f) return false
-        } else {
-            if (width > 0.90f || height > 0.90f || area > 0.70f) return false
-        }
-
+        } else if (width > 0.90f || height > 0.90f || area > 0.70f) return false
         val aspect = width / max(height, 0.0001f)
         return aspect in 0.08f..12f
     }
 
     private fun nonMaxSuppression(input: List<YoloDetection>): List<YoloDetection> {
-        val sorted = input.sortedByDescending { it.confidence }
         val kept = mutableListOf<YoloDetection>()
-        for (candidate in sorted) {
-            val overlaps = kept.any { existing ->
-                existing.classId == candidate.classId &&
-                    intersectionOverUnion(existing.normalizedBox, candidate.normalizedBox) > NMS_IOU
-            }
-            if (!overlaps) {
-                kept += candidate
-                if (kept.size >= MAX_DETECTIONS) break
-            }
+        for (candidate in input.sortedByDescending { it.confidence }) {
+            val overlaps = kept.any { it.classId == candidate.classId && intersectionOverUnion(it.normalizedBox, candidate.normalizedBox) > NMS_IOU }
+            if (!overlaps) { kept += candidate; if (kept.size >= MAX_DETECTIONS) break }
         }
         return kept
     }
 
     private fun intersectionOverUnion(a: RectF, b: RectF): Float {
-        val left = maxOf(a.left, b.left)
-        val top = maxOf(a.top, b.top)
-        val right = minOf(a.right, b.right)
-        val bottom = minOf(a.bottom, b.bottom)
+        val left = maxOf(a.left, b.left); val top = maxOf(a.top, b.top)
+        val right = minOf(a.right, b.right); val bottom = minOf(a.bottom, b.bottom)
         if (right <= left || bottom <= top) return 0f
         val intersection = (right - left) * (bottom - top)
         val union = a.width() * a.height() + b.width() * b.height() - intersection
         return if (union <= 0f) 0f else intersection / union
     }
 
-    override fun close() {
-        session.close()
-        sessionOptions.close()
-    }
+    override fun close() { session.close(); sessionOptions.close() }
 
     private companion object {
         const val MODEL_FILE = "yolo11n.onnx"
         const val INPUT_SIZE = 640
         const val NMS_IOU = 0.45f
         const val MAX_DETECTIONS = 24
-
-        val ANIMAL_LABELS = setOf(
-            "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"
-        )
+        val ANIMAL_LABELS = setOf("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe")
         val SCREEN_LABELS = setOf("tv", "laptop", "cell phone", "remote", "clock")
-
         val COCO_LABELS = listOf(
             "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
             "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
