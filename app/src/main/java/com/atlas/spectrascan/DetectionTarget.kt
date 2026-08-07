@@ -11,7 +11,6 @@ enum class TrackingProfile(val title:String,val smoothing:Float,val holdMs:Long,
 
 enum class TargetFilter(val title:String){
     ALL("ALL"),PEOPLE("PEOPLE"),ANIMALS("ANIMALS"),OBJECTS("OBJECTS"),SCREENS("SCREENS"),SKY("SKY"),MOTION("MOTION");
-    // MOTION remains legacy-only. SKY is part of the normal quick-filter cycle.
     fun next():TargetFilter=entries[(ordinal+1)%(entries.size-1)]
 }
 
@@ -24,5 +23,6 @@ data class DetectionTarget(
 data class DetectionFrame(
     val targets:List<DetectionTarget> = emptyList(),val imageWidth:Int=1,val imageHeight:Int=1,val inferenceFps:Int=0,val inferenceMs:Long=0L,
     val brightTrackerActive:Boolean=false,val motionTrackerActive:Boolean=false,val hybridFlowActive:Boolean=false,val targetFilter:TargetFilter=TargetFilter.ALL,
-    val rejectedCandidates:Int=0,val meanLuma:Float=255f,val lowLight:Boolean=false,val nightVisionSuggested:Boolean=false,val detectionThrottled:Boolean=false
+    val rejectedCandidates:Int=0,val meanLuma:Float=255f,val lowLight:Boolean=false,val nightVisionSuggested:Boolean=false,val detectionThrottled:Boolean=false,
+    val frameAtMs:Long=0L
 )
