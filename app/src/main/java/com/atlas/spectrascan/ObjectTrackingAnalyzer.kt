@@ -1,11 +1,7 @@
 package com.atlas.spectrascan
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
-import android.graphics.Paint
 import android.graphics.RectF
 import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
@@ -22,9 +18,15 @@ class ObjectTrackingAnalyzer(
     private val busy = AtomicBoolean(false)
     private val tracker = HybridTracker()
     private val motionDetector = MotionFlowDetector()
+    private val semanticFlow = SemanticFlowTracker()
     private val yoloDetector = lazy { YoloDetector(SpectraScanApplication.appContext) }
+
     private var lastResultAt = 0L
     private var lastYoloAt = 0L
+    private var previousYoloAt = 0L
+    private var lastYoloMs = 0L
+    private var lastYoloFps = 0
+    private var lastTargets: List<DetectionTarget> = emptyList()
 
     @Volatile private var targetFilter: TargetFilter = TargetFilter.ALL
     @Volatile private var digitalGain: Float = 1.0f
@@ -37,6 +39,9 @@ class ObjectTrackingAnalyzer(
             targetFilter = filter
             tracker.reset()
             motionDetector.reset()
+            semanticFlow.reset()
+            lastTargets = emptyList()
+            lastYoloAt = 0L
         }
     }
 
@@ -46,12 +51,15 @@ class ObjectTrackingAnalyzer(
         if (motionDetectionEnabled != enabled) {
             motionDetectionEnabled = enabled
             motionDetector.reset()
-            tracker.reset()
+            // Keep semantic tracks when toggling motion. The two channels are independent.
         }
     }
 
     override fun analyze(imageProxy: ImageProxy) {
-        if (!busy.compareAndSet(false, true)) { imageProxy.close(); return }
+        if (!busy.compareAndSet(false, true)) {
+            imageProxy.close()
+            return
+        }
 
         val startedAt = SystemClock.elapsedRealtime()
         val rotation = imageProxy.imageInfo.rotationDegrees
@@ -63,68 +71,80 @@ class ObjectTrackingAnalyzer(
             val meanLuma = calculateMeanLuma(imageProxy)
             val lowLight = meanLuma < 58f
             val nightVisionSuggested = meanLuma < 40f
+            val now = SystemClock.elapsedRealtime()
 
             val motionResult = if (motionDetectionEnabled) {
                 motionDetector.analyze(imageProxy, rotation)
             } else {
-                motionDetector.reset()
                 MotionFlowDetector.Result(emptyList(), 0f, 0f, false)
             }
-            val motionObservations = motionResult.observations
 
-            // Backwards compatibility only: an old saved MOTION filter behaves like
-            // class-agnostic motion mode, but the UI no longer cycles into this value.
+            // Cheap local appearance tracking runs between YOLO passes. It only searches
+            // small regions around previously confirmed semantic targets.
+            val flowResult = semanticFlow.track(imageProxy, rotation, now)
+
+            // Legacy class-agnostic motion mode remains supported, though the UI no
+            // longer cycles into it.
             if (activeFilter == TargetFilter.MOTION) {
-                val now = SystemClock.elapsedRealtime()
+                val targets = tracker.update(motionResult.observations, now)
+                lastTargets = targets
                 dispatchFrame(
-                    targets = tracker.update(motionObservations, now),
+                    targets = targets,
                     orientedWidth = orientedWidth,
                     orientedHeight = orientedHeight,
-                    startedAt = startedAt,
                     now = now,
                     brightTrackerActive = false,
                     motionTrackerActive = motionDetectionEnabled && motionResult.active,
+                    hybridFlowActive = false,
                     activeFilter = activeFilter,
                     rejectedCandidates = 0,
                     meanLuma = meanLuma,
                     lowLight = lowLight,
                     nightVisionSuggested = nightVisionSuggested,
-                    detectionThrottled = false,
-                    preserveTracker = false
+                    detectionThrottled = true
                 )
                 return
             }
 
-            val minYoloInterval = when {
-                meanLuma < 22f -> 700L
-                meanLuma < 38f -> 420L
-                meanLuma < 58f -> 240L
-                else -> 0L
-            }
-            val nowBeforeYolo = SystemClock.elapsedRealtime()
-            val throttled = minYoloInterval > 0L && nowBeforeYolo - lastYoloAt < minYoloInterval
+            val yoloInterval = adaptiveYoloInterval(
+                meanLuma = meanLuma,
+                flow = flowResult,
+                targets = lastTargets,
+                motionActive = motionDetectionEnabled && motionResult.active
+            )
+            val yoloDue = lastYoloAt == 0L || now - lastYoloAt >= yoloInterval
 
-            if (throttled) {
-                val hasMotion = motionDetectionEnabled && motionObservations.isNotEmpty()
+            if (!yoloDue) {
+                val observations = mergeLightweightObservations(
+                    flowResult.observations,
+                    if (motionDetectionEnabled) motionResult.observations else emptyList()
+                )
+                val targets = if (observations.isNotEmpty()) {
+                    tracker.update(observations, now)
+                } else {
+                    tracker.update(emptyList(), now)
+                }
+                lastTargets = targets
                 dispatchFrame(
-                    targets = if (hasMotion) tracker.update(motionObservations, nowBeforeYolo) else emptyList(),
+                    targets = targets,
                     orientedWidth = orientedWidth,
                     orientedHeight = orientedHeight,
-                    startedAt = startedAt,
-                    now = nowBeforeYolo,
+                    now = now,
                     brightTrackerActive = false,
                     motionTrackerActive = motionDetectionEnabled && motionResult.active,
+                    hybridFlowActive = flowResult.active,
                     activeFilter = activeFilter,
                     rejectedCandidates = 0,
                     meanLuma = meanLuma,
                     lowLight = lowLight,
                     nightVisionSuggested = nightVisionSuggested,
-                    detectionThrottled = true,
-                    preserveTracker = !hasMotion
+                    detectionThrottled = true
                 )
                 return
             }
-            lastYoloAt = nowBeforeYolo
+
+            previousYoloAt = lastYoloAt
+            lastYoloAt = now
 
             val brightObservation = if (activeFilter == TargetFilter.ALL || activeFilter == TargetFilter.SCREENS) {
                 findBrightRegion(imageProxy, rotation, meanLuma)
@@ -139,9 +159,20 @@ class ObjectTrackingAnalyzer(
                 else -> 1.0f
             }
             val effectiveGain = maxOf(digitalGain, automaticGain)
-            val detectorBitmap = if (effectiveGain > 1.01f) applyDigitalGain(orientedBitmap, effectiveGain) else orientedBitmap
-            val (detections, rejectedCandidates) = yoloDetector.value.detect(detectorBitmap, activeFilter)
 
+            val yoloStarted = SystemClock.elapsedRealtime()
+            val detectionResult = try {
+                yoloDetector.value.detect(orientedBitmap, activeFilter, effectiveGain)
+            } finally {
+                if (orientedBitmap !== cameraBitmap && !orientedBitmap.isRecycled) orientedBitmap.recycle()
+                if (!cameraBitmap.isRecycled) cameraBitmap.recycle()
+            }
+            lastYoloMs = SystemClock.elapsedRealtime() - yoloStarted
+            lastYoloFps = if (previousYoloAt <= 0L) 0 else {
+                (1000L / max(1L, lastYoloAt - previousYoloAt)).toInt().coerceIn(0, 30)
+            }
+
+            val (detections, rejectedCandidates) = detectionResult
             val observations = detections.map { detection ->
                 RawObservation(
                     sourceTrackingId = null,
@@ -151,14 +182,21 @@ class ObjectTrackingAnalyzer(
                 )
             }.toMutableList()
 
+            // A fresh semantic YOLO box wins. Local flow fills only objects not already
+            // covered by the detector on this pass.
+            flowResult.observations.forEach { flow ->
+                val overlapsSemantic = observations.any {
+                    intersectionOverUnion(it.normalizedBox, flow.normalizedBox) > 0.20f
+                }
+                if (!overlapsSemantic) observations += flow
+            }
+
             if (motionDetectionEnabled) {
-                // Motion is complementary. If YOLO already covers the same object,
-                // keep the semantic YOLO box instead of drawing a duplicate MOTION box.
-                motionObservations.forEach { motion ->
-                    val overlapsSemantic = observations.any {
+                motionResult.observations.forEach { motion ->
+                    val overlapsKnown = observations.any {
                         intersectionOverUnion(it.normalizedBox, motion.normalizedBox) > 0.18f
                     }
-                    if (!overlapsSemantic) observations += motion
+                    if (!overlapsKnown) observations += motion
                 }
             }
 
@@ -168,40 +206,47 @@ class ObjectTrackingAnalyzer(
                 observations += brightObservation
             }
 
-            val now = SystemClock.elapsedRealtime()
+            val afterYolo = SystemClock.elapsedRealtime()
+            val targets = tracker.update(observations, afterYolo)
+            lastTargets = targets
+
+            // Save small appearance templates after a semantic correction. Subsequent
+            // frames can now be tracked without another full-network inference.
+            semanticFlow.seed(imageProxy, rotation, targets, afterYolo)
+
             dispatchFrame(
-                targets = tracker.update(observations, now),
+                targets = targets,
                 orientedWidth = orientedWidth,
                 orientedHeight = orientedHeight,
-                startedAt = startedAt,
-                now = now,
+                now = afterYolo,
                 brightTrackerActive = brightObservation != null,
                 motionTrackerActive = motionDetectionEnabled && motionResult.active,
+                hybridFlowActive = flowResult.active,
                 activeFilter = activeFilter,
                 rejectedCandidates = rejectedCandidates,
                 meanLuma = meanLuma,
                 lowLight = lowLight,
                 nightVisionSuggested = nightVisionSuggested,
-                detectionThrottled = false,
-                preserveTracker = false
+                detectionThrottled = false
             )
         } catch (_: Throwable) {
             val now = SystemClock.elapsedRealtime()
+            val targets = tracker.update(emptyList(), now)
+            lastTargets = targets
             dispatchFrame(
-                targets = tracker.update(emptyList(), now),
+                targets = targets,
                 orientedWidth = orientedWidth,
                 orientedHeight = orientedHeight,
-                startedAt = startedAt,
                 now = now,
                 brightTrackerActive = false,
                 motionTrackerActive = false,
+                hybridFlowActive = false,
                 activeFilter = activeFilter,
                 rejectedCandidates = 0,
                 meanLuma = 255f,
                 lowLight = false,
                 nightVisionSuggested = false,
-                detectionThrottled = false,
-                preserveTracker = false
+                detectionThrottled = true
             )
         } finally {
             busy.set(false)
@@ -209,24 +254,75 @@ class ObjectTrackingAnalyzer(
         }
     }
 
+    /**
+     * Balanced mobile scheduler:
+     * - searching: ~2.5 FPS YOLO
+     * - stable local track: ~1.2-1.7 FPS YOLO recheck
+     * - weak/lost local track: temporarily 3-4 FPS
+     * - darkness always lowers the detector rate further
+     */
+    private fun adaptiveYoloInterval(
+        meanLuma: Float,
+        flow: SemanticFlowTracker.Result,
+        targets: List<DetectionTarget>,
+        motionActive: Boolean
+    ): Long {
+        val trackingInterval = when {
+            targets.isEmpty() -> if (motionActive) 320L else 400L
+            flow.active && flow.averageScore >= 0.76f -> 850L
+            flow.active && flow.averageScore >= 0.60f -> 650L
+            targets.any { it.status == TrackStatus.LOST || it.status == TrackStatus.PREDICTED } -> 260L
+            else -> 320L
+        }
+        val lowLightFloor = when {
+            meanLuma < 22f -> 800L
+            meanLuma < 38f -> 520L
+            meanLuma < 58f -> 320L
+            else -> 0L
+        }
+        return maxOf(trackingInterval, lowLightFloor)
+    }
+
+    private fun mergeLightweightObservations(
+        flow: List<RawObservation>,
+        motion: List<RawObservation>
+    ): List<RawObservation> {
+        if (flow.isEmpty()) return motion
+        if (motion.isEmpty()) return flow
+        val merged = flow.toMutableList()
+        motion.forEach { candidate ->
+            if (merged.none { intersectionOverUnion(it.normalizedBox, candidate.normalizedBox) > 0.18f }) {
+                merged += candidate
+            }
+        }
+        return merged
+    }
+
     private fun dispatchFrame(
-        targets: List<DetectionTarget>, orientedWidth: Int, orientedHeight: Int,
-        startedAt: Long, now: Long, brightTrackerActive: Boolean, motionTrackerActive: Boolean,
-        activeFilter: TargetFilter, rejectedCandidates: Int, meanLuma: Float,
-        lowLight: Boolean, nightVisionSuggested: Boolean, detectionThrottled: Boolean,
-        preserveTracker: Boolean
+        targets: List<DetectionTarget>,
+        orientedWidth: Int,
+        orientedHeight: Int,
+        now: Long,
+        brightTrackerActive: Boolean,
+        motionTrackerActive: Boolean,
+        hybridFlowActive: Boolean,
+        activeFilter: TargetFilter,
+        rejectedCandidates: Int,
+        meanLuma: Float,
+        lowLight: Boolean,
+        nightVisionSuggested: Boolean,
+        detectionThrottled: Boolean
     ) {
-        val frameDelta = if (lastResultAt == 0L) 0L else now - lastResultAt
         lastResultAt = now
-        val fps = if (frameDelta <= 0L) 0 else (1000L / max(1L, frameDelta)).toInt().coerceIn(0, 60)
         val frame = DetectionFrame(
-            targets = if (preserveTracker) emptyList() else targets,
+            targets = targets,
             imageWidth = orientedWidth,
             imageHeight = orientedHeight,
-            inferenceFps = fps,
-            inferenceMs = now - startedAt,
+            inferenceFps = lastYoloFps,
+            inferenceMs = lastYoloMs,
             brightTrackerActive = brightTrackerActive,
             motionTrackerActive = motionTrackerActive,
+            hybridFlowActive = hybridFlowActive,
             targetFilter = activeFilter,
             rejectedCandidates = rejectedCandidates,
             meanLuma = meanLuma,
@@ -243,27 +339,24 @@ class ObjectTrackingAnalyzer(
         return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
-    private fun applyDigitalGain(source: Bitmap, gain: Float): Bitmap {
-        val result = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
-        val matrix = ColorMatrix(floatArrayOf(
-            gain,0f,0f,0f,0f, 0f,gain,0f,0f,0f, 0f,0f,gain,0f,0f, 0f,0f,0f,1f,0f
-        ))
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { colorFilter = ColorMatrixColorFilter(matrix) }
-        Canvas(result).drawBitmap(source, 0f, 0f, paint)
-        return result
-    }
-
     private fun calculateMeanLuma(imageProxy: ImageProxy): Float {
         val plane = imageProxy.planes.firstOrNull() ?: return 255f
         val buffer = plane.buffer.duplicate()
-        val width = imageProxy.width; val height = imageProxy.height
-        val rowStride = plane.rowStride; val pixelStride = plane.pixelStride
-        var sum = 0L; var samples = 0; var y = 0
+        val width = imageProxy.width
+        val height = imageProxy.height
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        var sum = 0L
+        var samples = 0
+        var y = 0
         while (y < height) {
             var x = 0
             while (x < width) {
                 val index = y * rowStride + x * pixelStride
-                if (index < buffer.limit()) { sum += buffer.get(index).toInt() and 0xFF; samples++ }
+                if (index < buffer.limit()) {
+                    sum += buffer.get(index).toInt() and 0xFF
+                    samples++
+                }
                 x += 8
             }
             y += 8
@@ -274,12 +367,19 @@ class ObjectTrackingAnalyzer(
     private fun findBrightRegion(imageProxy: ImageProxy, rotation: Int, mean: Float): RawObservation? {
         val plane = imageProxy.planes.firstOrNull() ?: return null
         val buffer = plane.buffer.duplicate()
-        val width = imageProxy.width; val height = imageProxy.height
-        val rowStride = plane.rowStride; val pixelStride = plane.pixelStride
+        val width = imageProxy.width
+        val height = imageProxy.height
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
         if (mean > 110f) return null
         val threshold = maxOf(182f, mean + 72f).toInt()
-        var minX = width; var minY = height; var maxX = -1; var maxY = -1
-        var brightCount = 0; var samples = 0; var y = 0
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
+        var brightCount = 0
+        var samples = 0
+        var y = 0
         while (y < height) {
             var x = 0
             while (x < width) {
@@ -287,7 +387,11 @@ class ObjectTrackingAnalyzer(
                 if (index < buffer.limit()) {
                     samples++
                     if ((buffer.get(index).toInt() and 0xFF) >= threshold) {
-                        minX = minOf(minX, x); minY = minOf(minY, y); maxX = maxOf(maxX, x); maxY = maxOf(maxY, y); brightCount++
+                        minX = minOf(minX, x)
+                        minY = minOf(minY, y)
+                        maxX = maxOf(maxX, x)
+                        maxY = maxOf(maxY, y)
+                        brightCount++
                     }
                 }
                 x += 4
@@ -298,32 +402,48 @@ class ObjectTrackingAnalyzer(
         val ratio = brightCount.toFloat() / samples
         if (maxX <= minX || maxY <= minY || ratio !in 0.0015f..0.10f) return null
         val rawRect = RectF(
-            (minX.toFloat()/width-.02f).coerceIn(0f,1f), (minY.toFloat()/height-.02f).coerceIn(0f,1f),
-            (maxX.toFloat()/width+.02f).coerceIn(0f,1f), (maxY.toFloat()/height+.02f).coerceIn(0f,1f)
+            (minX.toFloat() / width - 0.02f).coerceIn(0f, 1f),
+            (minY.toFloat() / height - 0.02f).coerceIn(0f, 1f),
+            (maxX.toFloat() / width + 0.02f).coerceIn(0f, 1f),
+            (maxY.toFloat() / height + 0.02f).coerceIn(0f, 1f)
         )
         val orientedRect = rotateNormalizedRect(rawRect, rotation)
-        val area = orientedRect.width()*orientedRect.height()
-        if (orientedRect.width() !in .02f.. .55f || orientedRect.height() !in .02f.. .55f || area !in .0008f.. .16f) return null
-        return RawObservation(null, "BRIGHT OBJECT", (.48f + ratio*3.5f).coerceIn(.48f,.90f), orientedRect, fromBrightnessTracker = true)
+        val area = orientedRect.width() * orientedRect.height()
+        if (orientedRect.width() !in 0.02f..0.55f ||
+            orientedRect.height() !in 0.02f..0.55f ||
+            area !in 0.0008f..0.16f
+        ) return null
+        return RawObservation(
+            sourceTrackingId = null,
+            label = "BRIGHT OBJECT",
+            confidence = (0.48f + ratio * 3.5f).coerceIn(0.48f, 0.90f),
+            normalizedBox = orientedRect,
+            fromBrightnessTracker = true
+        )
     }
 
-    private fun rotateNormalizedRect(rect: RectF, rotation: Int): RectF = when(rotation) {
-        90 -> RectF(1f-rect.bottom, rect.left, 1f-rect.top, rect.right)
-        180 -> RectF(1f-rect.right, 1f-rect.bottom, 1f-rect.left, 1f-rect.top)
-        270 -> RectF(rect.top, 1f-rect.right, rect.bottom, 1f-rect.left)
+    private fun rotateNormalizedRect(rect: RectF, rotation: Int): RectF = when (rotation) {
+        90 -> RectF(1f - rect.bottom, rect.left, 1f - rect.top, rect.right)
+        180 -> RectF(1f - rect.right, 1f - rect.bottom, 1f - rect.left, 1f - rect.top)
+        270 -> RectF(rect.top, 1f - rect.right, rect.bottom, 1f - rect.left)
         else -> RectF(rect)
     }
 
     private fun intersectionOverUnion(a: RectF, b: RectF): Float {
-        val left=maxOf(a.left,b.left); val top=maxOf(a.top,b.top); val right=minOf(a.right,b.right); val bottom=minOf(a.bottom,b.bottom)
-        if (right<=left || bottom<=top) return 0f
-        val intersection=(right-left)*(bottom-top)
-        val union=a.width()*a.height()+b.width()*b.height()-intersection
-        return if (union<=0f) 0f else intersection/union
+        val left = maxOf(a.left, b.left)
+        val top = maxOf(a.top, b.top)
+        val right = minOf(a.right, b.right)
+        val bottom = minOf(a.bottom, b.bottom)
+        if (right <= left || bottom <= top) return 0f
+        val intersection = (right - left) * (bottom - top)
+        val union = a.width() * a.height() + b.width() * b.height() - intersection
+        return if (union <= 0f) 0f else intersection / union
     }
 
     override fun close() {
-        tracker.reset(); motionDetector.reset()
+        tracker.reset()
+        motionDetector.reset()
+        semanticFlow.reset()
         if (yoloDetector.isInitialized()) yoloDetector.value.close()
     }
 }
