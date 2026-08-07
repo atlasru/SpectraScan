@@ -5,6 +5,7 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="true" />
 
     <application
+        android:name=".SpectraScanApplication"
         android:allowBackup="true"
         android:label="SpectraScan"
         android:supportsRtl="true"
