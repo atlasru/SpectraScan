@@ -26,6 +26,8 @@ internal class HybridTracker {
         var lastSeenAt: Long,
         var updatedAt: Long,
         var hits: Int,
+        var consecutiveHits: Int,
+        var confirmed: Boolean,
         var fromBrightnessTracker: Boolean
     )
 
@@ -51,6 +53,8 @@ internal class HybridTracker {
                     lastSeenAt = now,
                     updatedAt = now,
                     hits = 1,
+                    consecutiveHits = 1,
+                    confirmed = false,
                     fromBrightnessTracker = observation.fromBrightnessTracker
                 )
             } else {
@@ -60,15 +64,26 @@ internal class HybridTracker {
         }
 
         unmatchedTrackIds.forEach { id ->
-            tracks[id]?.let { predictMissingTrack(it, now) }
+            tracks[id]?.let { track ->
+                track.consecutiveHits = 0
+                predictMissingTrack(track, now)
+            }
         }
 
-        tracks.entries.removeAll { (_, track) -> now - track.lastSeenAt > profile.holdMs }
+        tracks.entries.removeAll { (_, track) ->
+            val missingFor = now - track.lastSeenAt
+            if (track.confirmed) missingFor > profile.holdMs else missingFor > 350L
+        }
 
-        return tracks.values.map { track ->
+        return tracks.values.mapNotNull { track ->
+            val requiredHits = requiredConfirmationHits(track)
+            if (!track.confirmed && track.consecutiveHits >= requiredHits) {
+                track.confirmed = true
+            }
+            if (!track.confirmed) return@mapNotNull null
+
             val missingFor = now - track.lastSeenAt
             val status = when {
-                missingFor == 0L && track.hits < 2 -> TrackStatus.ACQUIRING
                 missingFor == 0L -> TrackStatus.TRACKING
                 missingFor <= profile.predictionMs -> TrackStatus.PREDICTED
                 else -> TrackStatus.LOST
@@ -85,7 +100,8 @@ internal class HybridTracker {
                 status = status,
                 missingForMs = missingFor,
                 velocityX = track.velocityX,
-                velocityY = track.velocityY
+                velocityY = track.velocityY,
+                fromBrightnessTracker = track.fromBrightnessTracker
             )
         }.sortedBy { it.trackingId }
     }
@@ -94,6 +110,12 @@ internal class HybridTracker {
     fun reset() {
         tracks.clear()
         nextStableId = 1
+    }
+
+    private fun requiredConfirmationHits(track: Track): Int = when {
+        track.fromBrightnessTracker -> 2
+        track.label == "HOME GOOD" || track.label == "FASHION GOOD" -> 4
+        else -> 3
     }
 
     private fun findBestTrack(
@@ -113,11 +135,11 @@ internal class HybridTracker {
             if (track.stableId !in availableIds) return@forEach
             val overlap = intersectionOverUnion(track.box, observation.normalizedBox)
             val distance = centerDistance(track.box, observation.normalizedBox)
-            if (overlap < 0.06f && distance > 0.24f) return@forEach
+            if (overlap < 0.08f && distance > 0.20f) return@forEach
 
-            var score = overlap * 1.8f - distance
-            if (track.label == observation.label) score += 0.18f
-            if (track.fromBrightnessTracker == observation.fromBrightnessTracker) score += 0.08f
+            var score = overlap * 1.9f - distance
+            if (track.label == observation.label) score += 0.20f
+            if (track.fromBrightnessTracker == observation.fromBrightnessTracker) score += 0.10f
             if (score > bestScore) {
                 bestScore = score
                 best = track
@@ -142,6 +164,7 @@ internal class HybridTracker {
         track.lastSeenAt = now
         track.updatedAt = now
         track.hits += 1
+        track.consecutiveHits += 1
         track.fromBrightnessTracker = observation.fromBrightnessTracker
     }
 
