@@ -30,7 +30,9 @@ enum class TargetFilter(val title: String) {
     SCREENS("SCREENS"),
     MOTION("MOTION");
 
-    fun next(): TargetFilter = entries[(ordinal + 1) % entries.size]
+    // MOTION is retained for backwards compatibility, but no longer appears
+    // in the normal filter cycle. Motion detection is now an independent toggle.
+    fun next(): TargetFilter = entries[(ordinal + 1) % (entries.size - 1)]
 }
 
 data class DetectionTarget(
