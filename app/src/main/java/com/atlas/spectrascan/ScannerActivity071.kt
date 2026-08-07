@@ -75,13 +75,9 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import java.util.Locale
 import java.util.concurrent.Executors
-import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.pow
-import kotlin.math.sin
 
 class ScannerActivity071 : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -233,7 +229,7 @@ private fun Settings071(
             Chip071(if (motionDetectionEnabled) "MOTION DETECTION ON" else "MOTION DETECTION OFF", true, motionDetectionEnabled, onClick = onMotionDetection)
             Chip071(if (trailsEnabled) "MOTION TRAIL ON" else "MOTION TRAIL OFF", true, trailsEnabled, onClick = onTrails)
             Chip071("CLEAR TRAILS", trailsPresent, onClick = onClear)
-            Text("HUD: VECTOR + LEAD + RADAR", color = H071.copy(alpha = .7f), fontSize = 8.sp)
+            Text("HUD: CLEAN BOX + RADAR", color = H071.copy(alpha = .7f), fontSize = 8.sp)
             Text("ISP: SHARPEN + DNR + STABILIZATION", color = H071.copy(alpha = .7f), fontSize = 8.sp)
         }
         Box(modifier = Modifier.align(Alignment.TopEnd).padding(top = 42.dp, end = 12.dp).border(1.dp, H071, RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = .92f), RoundedCornerShape(10.dp)).clickable(onClick = onClose).padding(horizontal = 18.dp, vertical = 12.dp)) { Text("CLOSE", color = H071, fontSize = 11.sp) }
@@ -345,51 +341,40 @@ private fun Hud071(frame: DetectionFrame, lockedId: Int?, trails: Map<Int, List<
             val r = rect071(t.normalizedBox, size.width, size.height, frame.imageWidth, frame.imageHeight)
             val isLocked = t.trackingId == lockedId; val c = if (isLocked) Color(0xFFFFD64A) else status071(t.status)
             drawTacticalBox071(r,c,t.status,isLocked)
-            val center=Offset(r.centerX(),r.centerY()); drawCircle(c.copy(alpha=.72f),3.5f,center)
-            val sp=speed071(t)
-            if(sp>.008f) drawVelocityVector071(t,r,c,frame)
-            if(isLocked){drawLine(c.copy(alpha=.48f),Offset(cx,cy),center,1.5f);drawCircle(c.copy(alpha=.45f),max(r.width(),r.height())*.58f,center,style=Stroke(1.4f))}
+            val center=Offset(r.centerX(),r.centerY())
+            if(isLocked){drawLine(c.copy(alpha=.42f),Offset(cx,cy),center,1.2f)}
             val pct=if(t.confidence>0f)" ${(t.confidence*100).toInt()}%" else "";paint.color=c.toArgb()
             drawContext.canvas.nativeCanvas.drawText("${t.label}$pct // #${t.trackingId}",r.left,(r.top-7f).coerceAtLeast(28f),paint)
-            if(sp>.008f){paint.textSize=15f;drawContext.canvas.nativeCanvas.drawText("V ${String.format(Locale.US,"%.03f",sp)}",r.left,(r.bottom+18f).coerceAtMost(size.height-8f),paint);paint.textSize=20f}
         }
         drawRadar071(frame.targets, lockedId)
     }
 }
 
 private fun DrawScope.drawTacticalFrame071(){
-    val c=H071.copy(alpha=.62f);val m=24f;val l=46f
-    drawLine(c,Offset(m,m),Offset(m+l,m),2f);drawLine(c,Offset(m,m),Offset(m,m+l),2f)
-    drawLine(c,Offset(size.width-m-l,m),Offset(size.width-m,m),2f);drawLine(c,Offset(size.width-m,m),Offset(size.width-m,m+l),2f)
-    drawLine(c,Offset(m,size.height-m),Offset(m+l,size.height-m),2f);drawLine(c,Offset(m,size.height-m-l),Offset(m,size.height-m),2f)
-    drawLine(c,Offset(size.width-m-l,size.height-m),Offset(size.width-m,size.height-m),2f);drawLine(c,Offset(size.width-m,size.height-m-l),Offset(size.width-m,size.height-m),2f)
-    val y=size.height*.18f;drawLine(c.copy(alpha=.25f),Offset(size.width*.18f,y),Offset(size.width*.82f,y),1f,pathEffect=PathEffect.dashPathEffect(floatArrayOf(10f,14f)))
+    val c=H071.copy(alpha=.50f);val m=24f;val l=46f
+    drawLine(c,Offset(m,m),Offset(m+l,m),1.4f);drawLine(c,Offset(m,m),Offset(m,m+l),1.4f)
+    drawLine(c,Offset(size.width-m-l,m),Offset(size.width-m,m),1.4f);drawLine(c,Offset(size.width-m,m),Offset(size.width-m,m+l),1.4f)
+    drawLine(c,Offset(m,size.height-m),Offset(m+l,size.height-m),1.4f);drawLine(c,Offset(m,size.height-m-l),Offset(m,size.height-m),1.4f)
+    drawLine(c,Offset(size.width-m-l,size.height-m),Offset(size.width-m,size.height-m),1.4f);drawLine(c,Offset(size.width-m,size.height-m-l),Offset(size.width-m,size.height-m),1.4f)
+    val y=size.height*.18f;drawLine(c.copy(alpha=.18f),Offset(size.width*.18f,y),Offset(size.width*.82f,y),1f,pathEffect=PathEffect.dashPathEffect(floatArrayOf(10f,14f)))
 }
 
 private fun DrawScope.drawTacticalBox071(r:RectF,c:Color,status:TrackStatus,locked:Boolean){
-    if(status==TrackStatus.PREDICTED||status==TrackStatus.LOST){drawRect(c.copy(alpha=.72f),Offset(r.left,r.top),Size(r.width(),r.height()),style=Stroke(if(locked)3.5f else 2f,pathEffect=PathEffect.dashPathEffect(floatArrayOf(13f,9f))));return}
-    val len=min(28f,min(r.width(),r.height())*.30f).coerceAtLeast(9f);val w=if(locked)4f else 2.6f
-    drawLine(c,Offset(r.left,r.top),Offset(r.left+len,r.top),w);drawLine(c,Offset(r.left,r.top),Offset(r.left,r.top+len),w)
-    drawLine(c,Offset(r.right-len,r.top),Offset(r.right,r.top),w);drawLine(c,Offset(r.right,r.top),Offset(r.right,r.top+len),w)
-    drawLine(c,Offset(r.left,r.bottom),Offset(r.left+len,r.bottom),w);drawLine(c,Offset(r.left,r.bottom-len),Offset(r.left,r.bottom),w)
-    drawLine(c,Offset(r.right-len,r.bottom),Offset(r.right,r.bottom),w);drawLine(c,Offset(r.right,r.bottom-len),Offset(r.right,r.bottom),w)
+    val predicted=status==TrackStatus.PREDICTED||status==TrackStatus.LOST
+    val stroke=if(locked)2.8f else 1.8f
+    drawRect(
+        color=if(predicted)c.copy(alpha=.72f) else c.copy(alpha=.92f),
+        topLeft=Offset(r.left,r.top),
+        size=Size(r.width(),r.height()),
+        style=Stroke(stroke,pathEffect=if(predicted)PathEffect.dashPathEffect(floatArrayOf(12f,8f))else null)
+    )
 }
 
-private fun DrawScope.drawVelocityVector071(t:DetectionTarget,r:RectF,c:Color,frame:DetectionFrame){
-    val start=Offset(r.centerX(),r.centerY());val sx=size.width.coerceAtLeast(1f);val sy=size.height.coerceAtLeast(1f)
-    val dx=(t.velocityX*sx*.38f).coerceIn(-150f,150f);val dy=(t.velocityY*sy*.38f).coerceIn(-150f,150f)
-    if(hypot(dx,dy)<7f)return
-    val end=Offset((start.x+dx).coerceIn(8f,size.width-8f),(start.y+dy).coerceIn(8f,size.height-8f));drawLine(c.copy(alpha=.82f),start,end,2f)
-    val a=atan2(end.y-start.y,end.x-start.x);val al=12f
-    drawLine(c.copy(alpha=.82f),end,Offset(end.x-cos(a-.52f)*al,end.y-sin(a-.52f)*al),2f);drawLine(c.copy(alpha=.82f),end,Offset(end.x-cos(a+.52f)*al,end.y-sin(a+.52f)*al),2f)
-    val lead=Offset((start.x+dx*1.55f).coerceIn(10f,size.width-10f),(start.y+dy*1.55f).coerceIn(10f,size.height-10f));drawCircle(c.copy(alpha=.45f),8f,lead,style=Stroke(1.4f));drawLine(c.copy(alpha=.35f),Offset(lead.x-12f,lead.y),Offset(lead.x+12f,lead.y),1f);drawLine(c.copy(alpha=.35f),Offset(lead.x,lead.y-12f),Offset(lead.x,lead.y+12f),1f)
-}
+private fun DrawScope.drawReticle071() { val cx=size.width/2f;val cy=size.height/2f;drawCircle(H071.copy(alpha=.42f),60f,Offset(cx,cy),style=Stroke(1.2f));drawCircle(H071.copy(alpha=.78f),5f,Offset(cx,cy),style=Stroke(1.2f));drawLine(H071.copy(alpha=.72f),Offset(cx-95f,cy),Offset(cx-16f,cy),1.2f);drawLine(H071.copy(alpha=.72f),Offset(cx+16f,cy),Offset(cx+95f,cy),1.2f);drawLine(H071.copy(alpha=.72f),Offset(cx,cy-95f),Offset(cx,cy-16f),1.2f);drawLine(H071.copy(alpha=.72f),Offset(cx,cy+16f),Offset(cx,cy+95f),1.2f) }
 
-private fun DrawScope.drawReticle071() { val cx=size.width/2f;val cy=size.height/2f;drawCircle(H071.copy(alpha=.55f),60f,Offset(cx,cy),style=Stroke(1.5f));drawCircle(H071,5f,Offset(cx,cy),style=Stroke(1.5f));drawLine(H071,Offset(cx-95f,cy),Offset(cx-16f,cy),1.5f);drawLine(H071,Offset(cx+16f,cy),Offset(cx+95f,cy),1.5f);drawLine(H071,Offset(cx,cy-95f),Offset(cx,cy-16f),1.5f);drawLine(H071,Offset(cx,cy+16f),Offset(cx,cy+95f),1.5f) }
+private fun DrawScope.drawTrails071(trails: Map<Int,List<Trail071>>, frame: DetectionFrame, lockedId: Int?) { val now=SystemClock.elapsedRealtime();trails.forEach { (id,pts)->if(pts.size<2)return@forEach;val c=if(id==lockedId)Color(0xFFFFD64A)else H071;for(i in 1 until pts.size){val a=pts[i-1];val b=pts[i];val age=now-b.at;if(age>TRAIL_AGE_071)continue;val alpha=(1f-age.toFloat()/TRAIL_AGE_071).coerceIn(.08f,.60f);drawLine(c.copy(alpha=alpha),point071(a.x,a.y,size.width,size.height,frame.imageWidth,frame.imageHeight),point071(b.x,b.y,size.width,size.height,frame.imageWidth,frame.imageHeight),if(id==lockedId)3f else 1.5f)}} }
 
-private fun DrawScope.drawTrails071(trails: Map<Int,List<Trail071>>, frame: DetectionFrame, lockedId: Int?) { val now=SystemClock.elapsedRealtime();trails.forEach { (id,pts)->if(pts.size<2)return@forEach;val c=if(id==lockedId)Color(0xFFFFD64A)else H071;for(i in 1 until pts.size){val a=pts[i-1];val b=pts[i];val age=now-b.at;if(age>TRAIL_AGE_071)continue;val alpha=(1f-age.toFloat()/TRAIL_AGE_071).coerceIn(.08f,.72f);drawLine(c.copy(alpha=alpha),point071(a.x,a.y,size.width,size.height,frame.imageWidth,frame.imageHeight),point071(b.x,b.y,size.width,size.height,frame.imageWidth,frame.imageHeight),if(id==lockedId)4f else 2f)}} }
-
-private fun DrawScope.drawRadar071(targets: List<DetectionTarget>, lockedId: Int?) { val radius=58f;val center=Offset(size.width-76f,size.height-130f);drawCircle(Color.Black.copy(alpha=.55f),radius+8f,center);drawCircle(H071,radius,center,style=Stroke(1.8f));drawCircle(H071.copy(alpha=.4f),radius/2,center,style=Stroke(1f));drawLine(H071.copy(alpha=.32f),Offset(center.x-radius,center.y),Offset(center.x+radius,center.y),1f);drawLine(H071.copy(alpha=.32f),Offset(center.x,center.y-radius),Offset(center.x,center.y+radius),1f);targets.forEach{t->val x=center.x+(t.normalizedBox.centerX()-.5f)*radius*1.6f;val y=center.y+(t.normalizedBox.centerY()-.5f)*radius*1.6f;drawCircle(if(t.trackingId==lockedId)Color(0xFFFFD64A)else status071(t.status),if(t.trackingId==lockedId)5f else 3.5f,Offset(x,y))} }
+private fun DrawScope.drawRadar071(targets: List<DetectionTarget>, lockedId: Int?) { val radius=58f;val center=Offset(size.width-76f,size.height-130f);drawCircle(Color.Black.copy(alpha=.50f),radius+8f,center);drawCircle(H071.copy(alpha=.82f),radius,center,style=Stroke(1.4f));drawCircle(H071.copy(alpha=.30f),radius/2,center,style=Stroke(1f));drawLine(H071.copy(alpha=.24f),Offset(center.x-radius,center.y),Offset(center.x+radius,center.y),1f);drawLine(H071.copy(alpha=.24f),Offset(center.x,center.y-radius),Offset(center.x,center.y+radius),1f);targets.forEach{t->val x=center.x+(t.normalizedBox.centerX()-.5f)*radius*1.6f;val y=center.y+(t.normalizedBox.centerY()-.5f)*radius*1.6f;drawCircle(if(t.trackingId==lockedId)Color(0xFFFFD64A)else status071(t.status),if(t.trackingId==lockedId)5f else 3.5f,Offset(x,y))} }
 
 @Composable
 private fun TargetPanel071(modifier: Modifier, bitmap: ImageBitmap?, target: DetectionTarget?, onUnlock: () -> Unit) { Column(modifier.width(170.dp).background(Color.Black.copy(alpha=.8f)).border(1.dp,status071(target?.status)).clickable(onClick=onUnlock).padding(5.dp)) { Box(Modifier.fillMaxWidth().height(110.dp).background(Color.Black),contentAlignment=Alignment.Center){if(bitmap!=null)Image(bitmap,"Locked target",Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Text("TARGET LOST",color=Color(0xFFFF5353),fontSize=10.sp)};Text("${target?.label ?: "TARGET"} #${target?.trackingId ?: "--"}",color=status071(target?.status),fontSize=9.sp,modifier=Modifier.padding(top=4.dp)) } }
