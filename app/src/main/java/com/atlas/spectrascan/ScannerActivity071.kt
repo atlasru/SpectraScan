@@ -10,6 +10,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.Surface
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -337,23 +338,43 @@ private fun Camera071(
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
+            var previewUseCase: Preview? = null
+            var analysisUseCase: ImageAnalysis? = null
             PreviewView(ctx).apply {
                 scaleType = PreviewView.ScaleType.FILL_CENTER
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                 onPreview(this)
+
+                fun syncTargetRotation() {
+                    val currentRotation = display?.rotation ?: Surface.ROTATION_0
+                    if (previewUseCase?.targetRotation != currentRotation) {
+                        previewUseCase?.targetRotation = currentRotation
+                    }
+                    if (analysisUseCase?.targetRotation != currentRotation) {
+                        analysisUseCase?.targetRotation = currentRotation
+                    }
+                }
+
+                addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> syncTargetRotation() }
+
                 val future = ProcessCameraProvider.getInstance(context)
                 future.addListener({
                     val p = future.get(); provider = p
                     val selectedInfo = CameraSelector.DEFAULT_BACK_CAMERA.filter(p.availableCameraInfos).first()
-                    val pb = Preview.Builder()
+                    val targetRotation = display?.rotation ?: Surface.ROTATION_0
+                    val pb = Preview.Builder().setTargetRotation(targetRotation)
                     CameraEnhancements.configurePreview(pb, selectedInfo, sharpen = true, denoise = true, stabilization = true)
                     val preview = pb.build().also { it.setSurfaceProvider(surfaceProvider) }
+                    previewUseCase = preview
                     val ab = ImageAnalysis.Builder().setTargetResolution(android.util.Size(640, 480))
+                        .setTargetRotation(targetRotation)
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     CameraEnhancements.configureAnalysis(ab, sharpen = true, denoise = true)
                     val analysis = ab.build().also { it.setAnalyzer(analysisExecutor, analyzer) }
+                    analysisUseCase = analysis
                     p.unbindAll()
                     camera = p.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                    syncTargetRotation()
                     camera?.cameraInfo?.zoomState?.value?.let { onZoomRange(it.minZoomRatio, it.maxZoomRatio) }
                 }, mainExecutor)
             }
@@ -481,5 +502,5 @@ private fun fastest071(ts:List<DetectionTarget>)=ts.filter{it.status!=TrackStatu
 private fun nearest071(ts:List<DetectionTarget>)=ts.minByOrNull{hypot(it.normalizedBox.centerX()-.5f,it.normalizedBox.centerY()-.5f)}
 private fun fmtZoom071(z:Float)=if(z<10f)String.format(Locale.US,"%.1fx",z) else String.format(Locale.US,"%.0fx",z)
 private fun point071(x:Float,y:Float,vw:Float,vh:Float,iw:Int,ih:Int):Offset{if(iw<=0||ih<=0)return Offset.Zero;val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;val dh=ih*s;return Offset((vw-dw)/2+x*dw,(vh-dh)/2+y*dh)}
-private fun rect071(b:RectF,vw:Float,vh:Float,iw:Int,ih:Int):RectF{if(iw<=0||ih<=0)return RectF();val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;valdh=ih*s;val ox=(vw-dw)/2;val oy=(vh-dh)/2;return RectF(ox+b.left*dw,oy+b.top*dh,ox+b.right*dw,oy+b.bottom*dh)}
+private fun rect071(b:RectF,vw:Float,vh:Float,iw:Int,ih:Int):RectF{if(iw<=0||ih<=0)return RectF();val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;val dh=ih*s;val ox=(vw-dw)/2;val oy=(vh-dh)/2;return RectF(ox+b.left*dw,oy+b.top*dh,ox+b.right*dw,oy+b.bottom*dh)}
 private fun crop071(source:Bitmap,target:DetectionTarget,frame:DetectionFrame):Bitmap?{val r=rect071(target.normalizedBox,source.width.toFloat(),source.height.toFloat(),frame.imageWidth,frame.imageHeight);val mx=r.width()*.16f;val my=r.height()*.16f;val l=(r.left-mx).toInt().coerceIn(0,source.width-1);val t=(r.top-my).toInt().coerceIn(0,source.height-1);val rr=(r.right+mx).toInt().coerceIn(l+1,source.width);val bb=(r.bottom+my).toInt().coerceIn(t+1,source.height);return runCatching{Bitmap.createBitmap(source,l,t,rr-l,bb-t)}.getOrNull()}
