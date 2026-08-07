@@ -12,8 +12,8 @@ android {
         applicationId = "com.atlas.spectrascan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.3.1"
+        versionCode = 5
+        versionName = "0.4.0"
     }
 
     signingConfigs {
@@ -54,6 +54,6 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.5.3")
     implementation("androidx.camera:camera-lifecycle:1.5.3")
     implementation("androidx.camera:camera-view:1.5.3")
-    implementation("com.google.mlkit:object-detection:17.0.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
