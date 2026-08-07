@@ -20,10 +20,13 @@ enum class TargetFilter(val title:String){
     fun next():TargetFilter=entries[(ordinal+1)%(entries.size-1)]
 }
 
+data class MaskCell(val x:Float,val y:Float,val width:Float,val height:Float,val confidence:Float=1f)
+
 data class DetectionTarget(
     val trackingId:Int,val label:String,val confidence:Float,val normalizedBox:RectF,
     val status:TrackStatus=TrackStatus.ACQUIRING,val missingForMs:Long=0L,val velocityX:Float=0f,val velocityY:Float=0f,
-    val fromBrightnessTracker:Boolean=false,val fromMotionTracker:Boolean=false,val fromFlowTracker:Boolean=false
+    val fromBrightnessTracker:Boolean=false,val fromMotionTracker:Boolean=false,val fromFlowTracker:Boolean=false,
+    val maskCells:List<MaskCell> = emptyList(), val maskQuality:Float = 0f
 )
 
 data class DetectionFrame(
