@@ -3,15 +3,19 @@ package com.atlas.spectrascan
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -64,6 +68,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
+import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.hypot
 import kotlin.math.max
@@ -124,9 +129,15 @@ private fun ScannerScreen() {
     var zoomBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
     var trailsEnabled by remember { mutableStateOf(true) }
     var trails by remember { mutableStateOf<Map<Int, List<MotionTrailPoint>>>(emptyMap()) }
+    var cameraZoom by remember { mutableStateOf(1.0f) }
+    var exposureIndex by remember { mutableStateOf(0) }
+    var monochrome by remember { mutableStateOf(false) }
+    var digitalGain by remember { mutableStateOf(1.0f) }
+    var autoNightVision by remember { mutableStateOf(true) }
 
     val latestFrame by rememberUpdatedState(frame)
     val lockedTarget = frame.targets.firstOrNull { it.trackingId == lockedId }
+    val nightVisionActive = autoNightVision && frame.nightVisionSuggested
     val globalStatus = when {
         lockedId != null && lockedTarget == null -> "TARGET LOST"
         lockedTarget != null -> lockedTarget.status.name
@@ -152,10 +163,19 @@ private fun ScannerScreen() {
             modifier = Modifier.fillMaxSize(),
             profile = profile,
             targetFilter = targetFilter,
+            zoomRatio = cameraZoom,
+            exposureIndex = exposureIndex,
+            monochrome = monochrome,
+            digitalGain = digitalGain,
+            nightVision = nightVisionActive,
             onPreviewReady = { previewView = it },
             onFrame = { nextFrame ->
-                frame = nextFrame
-                trails = updateMotionTrails(trails, nextFrame)
+                frame = if (nextFrame.detectionThrottled && nextFrame.targets.isEmpty()) {
+                    nextFrame.copy(targets = frame.targets)
+                } else {
+                    nextFrame
+                }
+                trails = updateMotionTrails(trails, frame)
             }
         )
 
@@ -185,7 +205,7 @@ private fun ScannerScreen() {
                 "YOLO ${frame.inferenceFps.toString().padStart(2, '0')} FPS  " +
                     "${frame.inferenceMs} MS  " +
                     "TARGETS ${frame.targets.size.toString().padStart(2, '0')}  " +
-                    "DROP ${frame.rejectedCandidates}",
+                    "LUMA ${frame.meanLuma.toInt()}",
                 color = HudColor.copy(alpha = 0.86f),
                 fontSize = 10.sp
             )
@@ -195,13 +215,21 @@ private fun ScannerScreen() {
                 color = statusColor(lockedTarget?.status, HudColor),
                 fontSize = 10.sp
             )
+            if (frame.lowLight) {
+                Text(
+                    if (nightVisionActive) "LOW LIGHT // AUTO NIGHT VISION" else "LOW LIGHT" +
+                        if (frame.detectionThrottled) " // DET ECO" else "",
+                    color = Color(0xFFFFB347),
+                    fontSize = 11.sp
+                )
+            }
         }
 
         if (lockedId != null) {
             TargetZoomPanel(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 82.dp, end = 14.dp),
+                    .padding(top = 98.dp, end = 14.dp),
                 bitmap = zoomBitmap,
                 target = lockedTarget,
                 color = HudColor,
@@ -214,67 +242,70 @@ private fun ScannerScreen() {
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
                 .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ControlChip(
-                    text = "CENTER LOCK",
-                    color = HudColor,
-                    enabled = frame.targets.isNotEmpty()
-                ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                ControlChip("CENTER LOCK", HudColor, frame.targets.isNotEmpty()) {
                     lockedId = nearestTargetToCenter(frame.targets)?.trackingId
                 }
-                ControlChip(
-                    text = "MOTION LOCK",
-                    color = HudColor,
-                    enabled = frame.targets.any { targetSpeed(it) > 0.015f }
-                ) {
+                ControlChip("MOTION LOCK", HudColor, frame.targets.any { targetSpeed(it) > 0.015f }) {
                     lockedId = fastestMovingTarget(frame.targets)?.trackingId
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ControlChip(
-                    text = "PROFILE ${profile.title}",
-                    color = HudColor,
-                    enabled = true
-                ) {
-                    profile = profile.next()
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                ControlChip("ZOOM ${formatZoom(cameraZoom)}", HudColor, true, cameraZoom > 1.01f) {
+                    cameraZoom = when {
+                        cameraZoom < 1.5f -> 2.0f
+                        cameraZoom < 3.0f -> 4.0f
+                        else -> 1.0f
+                    }
                 }
-                ControlChip(
-                    text = if (trailsEnabled) "TRAIL ON" else "TRAIL OFF",
-                    color = HudColor,
-                    enabled = true,
-                    selected = trailsEnabled
-                ) {
-                    trailsEnabled = !trailsEnabled
-                    if (!trailsEnabled) trails = emptyMap()
+                ControlChip("EV ${if (exposureIndex >= 0) "+" else ""}$exposureIndex", HudColor, true) {
+                    exposureIndex = if (exposureIndex >= 3) -3 else exposureIndex + 1
+                }
+                ControlChip("GAIN ${String.format(Locale.US, "%.1f", digitalGain)}x", HudColor, true, digitalGain > 1.01f) {
+                    digitalGain = when {
+                        digitalGain < 1.2f -> 1.35f
+                        digitalGain < 1.5f -> 1.70f
+                        digitalGain < 2.0f -> 2.20f
+                        else -> 1.0f
+                    }
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ControlChip(
-                    text = "FILTER ${targetFilter.title}",
-                    color = HudColor,
-                    enabled = true,
-                    selected = true
-                ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                ControlChip(if (monochrome) "B/W ON" else "B/W OFF", HudColor, true, monochrome) {
+                    monochrome = !monochrome
+                }
+                ControlChip(if (autoNightVision) "AUTO NV ON" else "AUTO NV OFF", HudColor, true, autoNightVision) {
+                    autoNightVision = !autoNightVision
+                }
+                ControlChip("PROFILE ${profile.title}", HudColor, true) {
+                    profile = profile.next()
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                ControlChip(if (trailsEnabled) "TRAIL ON" else "TRAIL OFF", HudColor, true, trailsEnabled) {
+                    trailsEnabled = !trailsEnabled
+                    if (!trailsEnabled) trails = emptyMap()
+                }
+                ControlChip("FILTER ${targetFilter.title}", HudColor, true, true) {
                     lockedId = null
                     trails = emptyMap()
                     targetFilter = targetFilter.next()
                 }
-                ControlChip(
-                    text = "CLEAR TRAIL",
-                    color = HudColor,
-                    enabled = trails.isNotEmpty()
-                ) {
+                ControlChip("CLEAR", HudColor, trails.isNotEmpty()) {
                     trails = emptyMap()
                 }
             }
         }
     }
 }
+
+private fun formatZoom(zoom: Float): String = String.format(Locale.US, "%.1fx", zoom)
 
 @Composable
 private fun ControlChip(
@@ -294,9 +325,9 @@ private fun ControlChip(
             .border(1.dp, visibleColor, RoundedCornerShape(8.dp))
             .background(Color.Black.copy(alpha = 0.68f), RoundedCornerShape(8.dp))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 9.dp)
+            .padding(horizontal = 9.dp, vertical = 8.dp)
     ) {
-        Text(text, color = visibleColor, fontSize = 10.sp)
+        Text(text, color = visibleColor, fontSize = 9.sp)
     }
 }
 
@@ -305,6 +336,11 @@ private fun CameraPreview(
     modifier: Modifier,
     profile: TrackingProfile,
     targetFilter: TargetFilter,
+    zoomRatio: Float,
+    exposureIndex: Int,
+    monochrome: Boolean,
+    digitalGain: Float,
+    nightVision: Boolean,
     onPreviewReady: (PreviewView) -> Unit,
     onFrame: (DetectionFrame) -> Unit
 ) {
@@ -317,9 +353,28 @@ private fun CameraPreview(
         ObjectTrackingAnalyzer(mainExecutor) { latestOnFrame(it) }
     }
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var camera by remember { mutableStateOf<Camera?>(null) }
 
     LaunchedEffect(profile) { analyzer.setProfile(profile) }
     LaunchedEffect(targetFilter) { analyzer.setTargetFilter(targetFilter) }
+    LaunchedEffect(digitalGain) { analyzer.setDigitalGain(digitalGain) }
+
+    LaunchedEffect(camera, zoomRatio) {
+        val activeCamera = camera ?: return@LaunchedEffect
+        val maxZoom = activeCamera.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
+        activeCamera.cameraControl.setZoomRatio(zoomRatio.coerceIn(1f, maxZoom))
+    }
+
+    LaunchedEffect(camera, exposureIndex) {
+        val activeCamera = camera ?: return@LaunchedEffect
+        val state = activeCamera.cameraInfo.exposureState
+        if (state.isExposureCompensationSupported) {
+            val range = state.exposureCompensationRange
+            activeCamera.cameraControl.setExposureCompensationIndex(
+                exposureIndex.coerceIn(range.lower, range.upper)
+            )
+        }
+    }
 
     AndroidView(
         modifier = modifier,
@@ -343,7 +398,7 @@ private fun CameraPreview(
                         .also { it.setAnalyzer(analysisExecutor, analyzer) }
 
                     provider.unbindAll()
-                    provider.bindToLifecycle(
+                    camera = provider.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.DEFAULT_BACK_CAMERA,
                         preview,
@@ -351,6 +406,9 @@ private fun CameraPreview(
                     )
                 }, mainExecutor)
             }
+        },
+        update = { preview ->
+            applyPreviewFilter(preview, monochrome, digitalGain, nightVision)
         }
     )
 
@@ -360,6 +418,48 @@ private fun CameraPreview(
             analyzer.close()
             analysisExecutor.shutdown()
         }
+    }
+}
+
+private fun applyPreviewFilter(
+    preview: PreviewView,
+    monochrome: Boolean,
+    gain: Float,
+    nightVision: Boolean
+) {
+    val effectiveGain = gain.coerceIn(1f, 2.4f)
+    val matrix = when {
+        nightVision -> {
+            val l = 1.35f * effectiveGain
+            ColorMatrix(floatArrayOf(
+                0.04f * l, 0.08f * l, 0.02f * l, 0f, 0f,
+                0.30f * l, 0.88f * l, 0.18f * l, 0f, 4f,
+                0.03f * l, 0.10f * l, 0.03f * l, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            ))
+        }
+        monochrome -> {
+            val l = effectiveGain
+            ColorMatrix(floatArrayOf(
+                0.299f * l, 0.587f * l, 0.114f * l, 0f, 0f,
+                0.299f * l, 0.587f * l, 0.114f * l, 0f, 0f,
+                0.299f * l, 0.587f * l, 0.114f * l, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f
+            ))
+        }
+        else -> ColorMatrix(floatArrayOf(
+            effectiveGain, 0f, 0f, 0f, 0f,
+            0f, effectiveGain, 0f, 0f, 0f,
+            0f, 0f, effectiveGain, 0f, 0f,
+            0f, 0f, 0f, 1f, 0f
+        ))
+    }
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        colorFilter = ColorMatrixColorFilter(matrix)
+    }
+    preview.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+    if (preview.childCount > 0) {
+        preview.getChildAt(0)?.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
     }
 }
 
@@ -449,7 +549,7 @@ private fun TrackingHud(
 
             val percent = if (target.confidence > 0f) " ${(target.confidence * 100).toInt()}%" else ""
             val source = if (target.fromBrightnessTracker) "BRT" else "YOLO"
-            val motion = if (speed > 0.015f) " // MOV ${String.format(java.util.Locale.US, "%.2f", speed)}" else ""
+            val motion = if (speed > 0.015f) " // MOV ${String.format(Locale.US, "%.2f", speed)}" else ""
             val label = "${target.status.name} // $source // ${target.label}$percent // #${target.trackingId}$motion"
             labelPaint.color = targetColor.toArgb()
             drawContext.canvas.nativeCanvas.drawText(
@@ -516,7 +616,7 @@ private fun DrawScope.drawRadar(
     lockedId: Int?
 ) {
     val radius = 70f
-    val center = Offset(size.width - 92f, size.height - 285f)
+    val center = Offset(size.width - 92f, size.height - 350f)
     drawCircle(Color.Black.copy(alpha = 0.52f), radius + 10f, center)
     drawCircle(color, radius, center, style = Stroke(3f))
     drawCircle(color.copy(alpha = 0.65f), radius / 2f, center, style = Stroke(2f))
