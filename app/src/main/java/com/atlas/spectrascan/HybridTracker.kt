@@ -4,321 +4,105 @@ import android.graphics.RectF
 import kotlin.math.hypot
 
 internal data class RawObservation(
-    val sourceTrackingId: Int?,
-    val label: String,
-    val confidence: Float,
-    val normalizedBox: RectF,
-    val fromBrightnessTracker: Boolean = false,
-    val fromMotionTracker: Boolean = false,
-    val fromFlowTracker: Boolean = false
+    val sourceTrackingId: Int?, val label: String, val confidence: Float, val normalizedBox: RectF,
+    val fromBrightnessTracker: Boolean = false, val fromMotionTracker: Boolean = false, val fromFlowTracker: Boolean = false
 )
 
 internal class HybridTracker {
-    @Volatile
-    var profile: TrackingProfile = TrackingProfile.BALANCED
+    @Volatile var profile: TrackingProfile = TrackingProfile.BALANCED
 
-    /** Small 1-D constant-velocity Kalman filter. Two instances form the 2-D tracker. */
     private class AxisKalman(initialPosition: Float) {
-        var position = initialPosition
-            private set
-        var velocity = 0f
-            private set
-
-        private var p00 = 0.08f
-        private var p01 = 0f
-        private var p10 = 0f
-        private var p11 = 0.20f
-
-        fun predict(dt: Float) {
-            val d = dt.coerceIn(0.001f, 0.35f)
-            position += velocity * d
-
-            val qPos = 0.0007f + d * 0.0015f
-            val qVel = 0.004f + d * 0.008f
-            val n00 = p00 + d * (p01 + p10) + d * d * p11 + qPos
-            val n01 = p01 + d * p11
-            val n10 = p10 + d * p11
-            val n11 = p11 + qVel
-            p00 = n00
-            p01 = n01
-            p10 = n10
-            p11 = n11
-        }
-
-        fun correct(measurement: Float, measurementNoise: Float) {
-            val r = measurementNoise.coerceIn(0.001f, 0.20f)
-            val innovation = measurement - position
-            val s = p00 + r
-            if (s <= 0f) return
-            val k0 = p00 / s
-            val k1 = p10 / s
-
-            val oldP00 = p00
-            val oldP01 = p01
-            val oldP10 = p10
-            val oldP11 = p11
-
-            position += k0 * innovation
-            velocity += k1 * innovation
-            p00 = (1f - k0) * oldP00
-            p01 = (1f - k0) * oldP01
-            p10 = oldP10 - k1 * oldP00
-            p11 = oldP11 - k1 * oldP01
-        }
+        var position = initialPosition; private set
+        var velocity = 0f; private set
+        private var p00=.08f; private var p01=0f; private var p10=0f; private var p11=.20f
+        fun predict(dtIn: Float) { val d=dtIn.coerceIn(.001f,.25f); position+=velocity*d; val q0=.0007f+d*.0015f; val q1=.004f+d*.008f; val n00=p00+d*(p01+p10)+d*d*p11+q0; val n01=p01+d*p11; val n10=p10+d*p11; val n11=p11+q1; p00=n00;p01=n01;p10=n10;p11=n11 }
+        fun correct(m:Float, noise:Float) { val r=noise.coerceIn(.001f,.20f); val innovation=m-position; val s=p00+r;if(s<=0)return;val k0=p00/s;val k1=p10/s;val a=p00;val b=p01;val c=p10;val d=p11;position+=k0*innovation;velocity+=k1*innovation;p00=(1-k0)*a;p01=(1-k0)*b;p10=c-k1*a;p11=d-k1*b }
     }
 
     private data class Track(
-        val stableId: Int,
-        var sourceTrackingId: Int?,
-        var label: String,
-        var confidence: Float,
-        var box: RectF,
-        var velocityX: Float,
-        var velocityY: Float,
-        var lastSeenAt: Long,
-        var updatedAt: Long,
-        var hits: Int,
-        var consecutiveHits: Int,
-        var confirmed: Boolean,
-        var fromBrightnessTracker: Boolean,
-        var fromMotionTracker: Boolean,
-        var fromFlowTracker: Boolean,
-        val kalmanX: AxisKalman,
-        val kalmanY: AxisKalman
+        val stableId:Int, var sourceTrackingId:Int?, var label:String, var confidence:Float, var box:RectF,
+        var velocityX:Float, var velocityY:Float, var lastSeenAt:Long, var lastSemanticAt:Long, var updatedAt:Long,
+        var hits:Int, var semanticHits:Int, var consecutiveHits:Int, var confirmed:Boolean,
+        var fromBrightnessTracker:Boolean, var fromMotionTracker:Boolean, var fromFlowTracker:Boolean,
+        val kalmanX:AxisKalman, val kalmanY:AxisKalman
     )
+    private val tracks=linkedMapOf<Int,Track>(); private var nextStableId=1
 
-    private val tracks = linkedMapOf<Int, Track>()
-    private var nextStableId = 1
-
-    @Synchronized
-    fun update(observations: List<RawObservation>, now: Long): List<DetectionTarget> {
-        val unmatchedTrackIds = tracks.keys.toMutableSet()
-
-        observations.forEach { observation ->
-            val matchingTrack = findBestTrack(observation, unmatchedTrackIds)
-            if (matchingTrack == null) {
-                val stableId = nextStableId++
-                tracks[stableId] = Track(
-                    stableId = stableId,
-                    sourceTrackingId = observation.sourceTrackingId,
-                    label = observation.label,
-                    confidence = observation.confidence,
-                    box = RectF(observation.normalizedBox),
-                    velocityX = 0f,
-                    velocityY = 0f,
-                    lastSeenAt = now,
-                    updatedAt = now,
-                    hits = 1,
-                    consecutiveHits = 1,
-                    confirmed = false,
-                    fromBrightnessTracker = observation.fromBrightnessTracker,
-                    fromMotionTracker = observation.fromMotionTracker,
-                    fromFlowTracker = observation.fromFlowTracker,
-                    kalmanX = AxisKalman(observation.normalizedBox.centerX()),
-                    kalmanY = AxisKalman(observation.normalizedBox.centerY())
-                )
-            } else {
-                unmatchedTrackIds.remove(matchingTrack.stableId)
-                updateObservedTrack(matchingTrack, observation, now)
-            }
+    @Synchronized fun update(observations:List<RawObservation>, now:Long):List<DetectionTarget> {
+        val available=tracks.keys.toMutableSet()
+        observations.sortedBy { it.fromFlowTracker }.forEach { obs ->
+            val match=findBestTrack(obs,available)
+            if(match==null) {
+                // Flow may never create a semantic identity by itself.
+                if(obs.fromFlowTracker) return@forEach
+                val id=nextStableId++; val semantic=!obs.fromBrightnessTracker&&!obs.fromMotionTracker
+                tracks[id]=Track(id,obs.sourceTrackingId,obs.label,obs.confidence,RectF(obs.normalizedBox),0f,0f,now,if(semantic)now else 0L,now,1,if(semantic)1 else 0,1,false,obs.fromBrightnessTracker,obs.fromMotionTracker,false,AxisKalman(obs.normalizedBox.centerX()),AxisKalman(obs.normalizedBox.centerY()))
+            } else { available.remove(match.stableId); updateObservedTrack(match,obs,now) }
         }
-
-        unmatchedTrackIds.forEach { id ->
-            tracks[id]?.let { track ->
-                track.consecutiveHits = 0
-                predictMissingTrack(track, now)
-            }
+        available.forEach { id->tracks[id]?.let{it.consecutiveHits=0;predictMissingTrack(it,now)} }
+        tracks.entries.removeAll { (_,t)->
+            val semantic=t.lastSemanticAt>0L
+            if(semantic) now-t.lastSemanticAt>SEMANTIC_HARD_TTL_MS else now-t.lastSeenAt>(if(t.confirmed)profile.holdMs else 500L)
         }
-
-        tracks.entries.removeAll { (_, track) ->
-            val missingFor = now - track.lastSeenAt
-            if (track.confirmed) missingFor > profile.holdMs else missingFor > 500L
-        }
-
         return buildTargets(now)
     }
 
-    @Synchronized
-    fun snapshot(now: Long): List<DetectionTarget> = buildTargets(now)
+    @Synchronized fun snapshot(now:Long)=buildTargets(now)
+    @Synchronized fun reset(){tracks.clear();nextStableId=1}
 
-    @Synchronized
-    fun reset() {
-        tracks.clear()
-        nextStableId = 1
-    }
-
-    private fun buildTargets(now: Long): List<DetectionTarget> = tracks.values.mapNotNull { track ->
-        val requiredHits = requiredConfirmationHits(track)
-        val confirmationCount = if (track.fromMotionTracker || track.fromBrightnessTracker) {
-            track.consecutiveHits
-        } else {
-            // Semantic detections may have cheap flow frames between YOLO rechecks.
-            // Count repeated semantic/flow hits without demanding back-to-back YOLO frames.
-            track.hits
-        }
-        if (!track.confirmed && confirmationCount >= requiredHits) {
-            track.confirmed = true
-        }
-        if (!track.confirmed) return@mapNotNull null
-
-        val missingFor = now - track.lastSeenAt
-        val status = when {
-            missingFor == 0L -> TrackStatus.TRACKING
-            missingFor <= profile.predictionMs -> TrackStatus.PREDICTED
+    private fun buildTargets(now:Long)=tracks.values.mapNotNull { t->
+        val confirmation=if(t.fromMotionTracker||t.fromBrightnessTracker)t.consecutiveHits else t.semanticHits
+        if(!t.confirmed&&confirmation>=requiredHits(t))t.confirmed=true
+        if(!t.confirmed)return@mapNotNull null
+        val semanticAge=if(t.lastSemanticAt>0)now-t.lastSemanticAt else 0L
+        val missing=now-t.lastSeenAt
+        val status=when {
+            t.lastSemanticAt>0 && semanticAge>SEMANTIC_UNCERTAIN_MS -> TrackStatus.PREDICTED
+            missing==0L && !t.fromFlowTracker -> TrackStatus.TRACKING
+            missing<=profile.predictionMs || t.fromFlowTracker -> TrackStatus.PREDICTED
             else -> TrackStatus.LOST
         }
-        val confidenceDecay = if (missingFor == 0L) 1f else {
-            (1f - missingFor.toFloat() / profile.holdMs.toFloat()).coerceIn(0.15f, 1f)
-        }
+        val semanticDecay=if(t.lastSemanticAt>0)(1f-semanticAge.toFloat()/SEMANTIC_HARD_TTL_MS).coerceIn(.12f,1f) else 1f
+        val missingDecay=if(missing==0L)1f else (1f-missing.toFloat()/profile.holdMs).coerceIn(.15f,1f)
+        DetectionTarget(t.stableId,t.label,t.confidence*minOf(semanticDecay,missingDecay),RectF(t.box),status,missing,t.velocityX,t.velocityY,t.fromBrightnessTracker,t.fromMotionTracker,t.fromFlowTracker)
+    }.sortedBy{it.trackingId}
 
-        DetectionTarget(
-            trackingId = track.stableId,
-            label = track.label,
-            confidence = track.confidence * confidenceDecay,
-            normalizedBox = RectF(track.box),
-            status = status,
-            missingForMs = missingFor,
-            velocityX = track.velocityX,
-            velocityY = track.velocityY,
-            fromBrightnessTracker = track.fromBrightnessTracker,
-            fromMotionTracker = track.fromMotionTracker,
-            fromFlowTracker = track.fromFlowTracker
-        )
-    }.sortedBy { it.trackingId }
+    private fun requiredHits(t:Track)=when{t.fromMotionTracker->2;t.fromBrightnessTracker->2;t.label in FAST_CONFIRM_LABELS->2;else->3}
 
-    private fun requiredConfirmationHits(track: Track): Int = when {
-        track.fromFlowTracker -> 1
-        track.fromMotionTracker -> 2
-        track.fromBrightnessTracker -> 2
-        track.label in FAST_CONFIRM_LABELS -> 2
-        else -> 3
-    }
-
-    private fun findBestTrack(
-        observation: RawObservation,
-        availableIds: Set<Int>
-    ): Track? {
-        if (observation.sourceTrackingId != null) {
-            // Local flow uses our stable id as a direct hint. Legacy sources may still
-            // provide their own source id, so support both forms.
-            tracks[observation.sourceTrackingId]?.takeIf { it.stableId in availableIds }?.let { return it }
-            tracks.values.firstOrNull {
-                it.stableId in availableIds && it.sourceTrackingId == observation.sourceTrackingId
-            }?.let { return it }
-        }
-
-        var best: Track? = null
-        var bestScore = Float.NEGATIVE_INFINITY
-        tracks.values.forEach { track ->
-            if (track.stableId !in availableIds) return@forEach
-            val overlap = intersectionOverUnion(track.box, observation.normalizedBox)
-            val distance = centerDistance(track.box, observation.normalizedBox)
-            if (overlap < 0.06f && distance > 0.24f) return@forEach
-
-            var score = overlap * 1.9f - distance
-            if (track.label == observation.label) score += 0.25f
-            if (track.fromBrightnessTracker == observation.fromBrightnessTracker) score += 0.10f
-            if (track.fromMotionTracker == observation.fromMotionTracker) score += 0.18f
-            if (track.fromFlowTracker == observation.fromFlowTracker) score += 0.16f
-            if (score > bestScore) {
-                bestScore = score
-                best = track
-            }
-        }
+    private fun findBestTrack(o:RawObservation,ids:Set<Int>):Track? {
+        if(o.sourceTrackingId!=null){tracks[o.sourceTrackingId]?.takeIf{it.stableId in ids}?.let{return it};tracks.values.firstOrNull{it.stableId in ids&&it.sourceTrackingId==o.sourceTrackingId}?.let{return it}}
+        var best:Track?=null;var bestScore=Float.NEGATIVE_INFINITY
+        tracks.values.forEach{t->if(t.stableId !in ids)return@forEach;val iou=iou(t.box,o.normalizedBox);val dist=centerDistance(t.box,o.normalizedBox)
+            val sameLabel=t.label==o.label
+            val semantic=!o.fromFlowTracker&&!o.fromMotionTracker&&!o.fromBrightnessTracker
+            if(semantic && (!sameLabel || (iou<.12f&&dist>.16f)))return@forEach
+            if(!semantic && iou<.08f&&dist>.18f)return@forEach
+            var s=iou*2.4f-dist*1.5f;if(sameLabel)s+=.40f;if(t.fromMotionTracker==o.fromMotionTracker)s+=.08f;if(s>bestScore){bestScore=s;best=t}}
         return best
     }
 
-    private fun updateObservedTrack(track: Track, observation: RawObservation, now: Long) {
-        val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.35f)
-        track.kalmanX.predict(dtSeconds)
-        track.kalmanY.predict(dtSeconds)
-
-        // Flow/template matches are noisier than YOLO boxes; semantic detections get
-        // a stronger correction while local tracking remains smooth.
-        val measurementNoise = when {
-            observation.fromMotionTracker -> 0.050f
-            observation.fromBrightnessTracker -> 0.045f
-            observation.fromFlowTracker -> 0.030f
-            else -> 0.012f
-        }
-        track.kalmanX.correct(observation.normalizedBox.centerX(), measurementNoise)
-        track.kalmanY.correct(observation.normalizedBox.centerY(), measurementNoise)
-
-        track.velocityX = track.kalmanX.velocity
-        track.velocityY = track.kalmanY.velocity
-
-        val width = track.box.width() + (observation.normalizedBox.width() - track.box.width()) * profile.smoothing
-        val height = track.box.height() + (observation.normalizedBox.height() - track.box.height()) * profile.smoothing
-        track.box = centeredAndClamp(track.kalmanX.position, track.kalmanY.position, width, height)
-        track.sourceTrackingId = if (observation.fromFlowTracker) track.sourceTrackingId else observation.sourceTrackingId ?: track.sourceTrackingId
-
-        // Local flow carries the remembered semantic label; generic motion should
-        // never overwrite an already-known YOLO class.
-        if (!observation.fromMotionTracker || track.label == "MOTION") {
-            track.label = observation.label
-        }
-
-        track.confidence = if (observation.fromFlowTracker) {
-            maxOf(track.confidence * 0.96f, observation.confidence)
-        } else {
-            maxOf(track.confidence * 0.72f, observation.confidence)
-        }
-        track.lastSeenAt = now
-        track.updatedAt = now
-        track.hits += 1
-        track.consecutiveHits += 1
-        track.fromBrightnessTracker = observation.fromBrightnessTracker
-        track.fromMotionTracker = observation.fromMotionTracker
-        track.fromFlowTracker = observation.fromFlowTracker
+    private fun updateObservedTrack(t:Track,o:RawObservation,now:Long){
+        val dt=((now-t.updatedAt).coerceAtLeast(1)/1000f).coerceAtMost(.25f);t.kalmanX.predict(dt);t.kalmanY.predict(dt)
+        val noise=when{ o.fromMotionTracker->.05f;o.fromBrightnessTracker->.045f;o.fromFlowTracker->.065f;else->.010f }
+        t.kalmanX.correct(o.normalizedBox.centerX(),noise);t.kalmanY.correct(o.normalizedBox.centerY(),noise)
+        t.velocityX=t.kalmanX.velocity.coerceIn(-1.5f,1.5f);t.velocityY=t.kalmanY.velocity.coerceIn(-1.5f,1.5f)
+        val semantic=!o.fromFlowTracker&&!o.fromMotionTracker&&!o.fromBrightnessTracker
+        val smooth=if(o.fromFlowTracker)minOf(profile.smoothing,.30f) else profile.smoothing
+        val oldW=t.box.width();val oldH=t.box.height();val requestedW=oldW+(o.normalizedBox.width()-oldW)*smooth;val requestedH=oldH+(o.normalizedBox.height()-oldH)*smooth
+        val width=requestedW.coerceIn(oldW*.72f,oldW*1.38f);val height=requestedH.coerceIn(oldH*.72f,oldH*1.38f)
+        t.box=centered(t.kalmanX.position,t.kalmanY.position,width,height)
+        if(semantic){t.label=o.label;t.confidence=maxOf(t.confidence*.65f,o.confidence);t.lastSemanticAt=now;t.semanticHits++;t.fromFlowTracker=false;t.sourceTrackingId=o.sourceTrackingId?:t.sourceTrackingId}
+        else if(o.fromFlowTracker){t.confidence=minOf(t.confidence,o.confidence);t.fromFlowTracker=true}
+        else {if(!o.fromMotionTracker||t.label=="MOTION")t.label=o.label;t.confidence=maxOf(t.confidence*.72f,o.confidence);t.fromFlowTracker=false}
+        t.lastSeenAt=now;t.updatedAt=now;t.hits++;t.consecutiveHits++;t.fromBrightnessTracker=o.fromBrightnessTracker;t.fromMotionTracker=o.fromMotionTracker
     }
 
-    private fun predictMissingTrack(track: Track, now: Long) {
-        val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.25f)
-        val age = now - track.lastSeenAt
-        if (age <= profile.holdMs) {
-            track.kalmanX.predict(dtSeconds)
-            track.kalmanY.predict(dtSeconds)
-            track.velocityX = track.kalmanX.velocity
-            track.velocityY = track.kalmanY.velocity
-            track.box = centeredAndClamp(
-                track.kalmanX.position,
-                track.kalmanY.position,
-                track.box.width(),
-                track.box.height()
-            )
-            track.updatedAt = now
-        }
-    }
-
-    private fun centeredAndClamp(cx: Float, cy: Float, widthIn: Float, heightIn: Float): RectF {
-        val width = widthIn.coerceIn(0.008f, 0.98f)
-        val height = heightIn.coerceIn(0.008f, 0.98f)
-        val left = (cx - width / 2f).coerceIn(0f, 1f - width)
-        val top = (cy - height / 2f).coerceIn(0f, 1f - height)
-        return RectF(left, top, left + width, top + height)
-    }
-
-    private fun intersectionOverUnion(a: RectF, b: RectF): Float {
-        val left = maxOf(a.left, b.left)
-        val top = maxOf(a.top, b.top)
-        val right = minOf(a.right, b.right)
-        val bottom = minOf(a.bottom, b.bottom)
-        if (right <= left || bottom <= top) return 0f
-        val intersection = (right - left) * (bottom - top)
-        val union = a.width() * a.height() + b.width() * b.height() - intersection
-        return if (union <= 0f) 0f else intersection / union
-    }
-
-    private fun centerDistance(a: RectF, b: RectF): Float = hypot(
-        a.centerX() - b.centerX(),
-        a.centerY() - b.centerY()
-    )
-
-    private companion object {
-        val FAST_CONFIRM_LABELS = setOf(
-            "PERSON", "CELL PHONE", "TV", "LAPTOP", "REMOTE", "CLOCK",
-            "CAT", "DOG", "BIRD", "HORSE", "SHEEP", "COW", "ELEPHANT", "BEAR", "ZEBRA", "GIRAFFE",
-            "CAR", "MOTORCYCLE", "AIRPLANE", "BUS", "TRAIN", "TRUCK", "BOAT"
-        )
+    private fun predictMissingTrack(t:Track,now:Long){val dt=((now-t.updatedAt).coerceAtLeast(1)/1000f).coerceAtMost(.20f);val allowed=if(t.lastSemanticAt>0)SEMANTIC_HARD_TTL_MS else profile.holdMs;if(now-t.lastSeenAt<=allowed){t.kalmanX.predict(dt);t.kalmanY.predict(dt);t.velocityX=t.kalmanX.velocity;t.velocityY=t.kalmanY.velocity;t.box=centered(t.kalmanX.position,t.kalmanY.position,t.box.width(),t.box.height());t.updatedAt=now}}
+    private fun centered(cx:Float,cy:Float,w0:Float,h0:Float):RectF{val w=w0.coerceIn(.008f,.98f);val h=h0.coerceIn(.008f,.98f);val l=(cx-w/2).coerceIn(0f,1f-w);val top=(cy-h/2).coerceIn(0f,1f-h);return RectF(l,top,l+w,top+h)}
+    private fun iou(a:RectF,b:RectF):Float{val l=maxOf(a.left,b.left);val t=maxOf(a.top,b.top);val r=minOf(a.right,b.right);val bot=minOf(a.bottom,b.bottom);if(r<=l||bot<=t)return 0f;val x=(r-l)*(bot-t);val u=a.width()*a.height()+b.width()*b.height()-x;return if(u<=0)0f else x/u}
+    private fun centerDistance(a:RectF,b:RectF)=hypot(a.centerX()-b.centerX(),a.centerY()-b.centerY())
+    private companion object{
+        const val SEMANTIC_UNCERTAIN_MS=650L;const val SEMANTIC_HARD_TTL_MS=1_350L
+        val FAST_CONFIRM_LABELS=setOf("PERSON","CELL PHONE","TV","LAPTOP","REMOTE","CLOCK","CAT","DOG","BIRD","HORSE","SHEEP","COW","ELEPHANT","BEAR","ZEBRA","GIRAFFE","CAR","MOTORCYCLE","AIRPLANE","BUS","TRAIN","TRUCK","BOAT")
     }
 }
