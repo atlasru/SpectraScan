@@ -9,12 +9,63 @@ internal data class RawObservation(
     val confidence: Float,
     val normalizedBox: RectF,
     val fromBrightnessTracker: Boolean = false,
-    val fromMotionTracker: Boolean = false
+    val fromMotionTracker: Boolean = false,
+    val fromFlowTracker: Boolean = false
 )
 
 internal class HybridTracker {
     @Volatile
     var profile: TrackingProfile = TrackingProfile.BALANCED
+
+    /** Small 1-D constant-velocity Kalman filter. Two instances form the 2-D tracker. */
+    private class AxisKalman(initialPosition: Float) {
+        var position = initialPosition
+            private set
+        var velocity = 0f
+            private set
+
+        private var p00 = 0.08f
+        private var p01 = 0f
+        private var p10 = 0f
+        private var p11 = 0.20f
+
+        fun predict(dt: Float) {
+            val d = dt.coerceIn(0.001f, 0.35f)
+            position += velocity * d
+
+            val qPos = 0.0007f + d * 0.0015f
+            val qVel = 0.004f + d * 0.008f
+            val n00 = p00 + d * (p01 + p10) + d * d * p11 + qPos
+            val n01 = p01 + d * p11
+            val n10 = p10 + d * p11
+            val n11 = p11 + qVel
+            p00 = n00
+            p01 = n01
+            p10 = n10
+            p11 = n11
+        }
+
+        fun correct(measurement: Float, measurementNoise: Float) {
+            val r = measurementNoise.coerceIn(0.001f, 0.20f)
+            val innovation = measurement - position
+            val s = p00 + r
+            if (s <= 0f) return
+            val k0 = p00 / s
+            val k1 = p10 / s
+
+            val oldP00 = p00
+            val oldP01 = p01
+            val oldP10 = p10
+            val oldP11 = p11
+
+            position += k0 * innovation
+            velocity += k1 * innovation
+            p00 = (1f - k0) * oldP00
+            p01 = (1f - k0) * oldP01
+            p10 = oldP10 - k1 * oldP00
+            p11 = oldP11 - k1 * oldP01
+        }
+    }
 
     private data class Track(
         val stableId: Int,
@@ -30,7 +81,10 @@ internal class HybridTracker {
         var consecutiveHits: Int,
         var confirmed: Boolean,
         var fromBrightnessTracker: Boolean,
-        var fromMotionTracker: Boolean
+        var fromMotionTracker: Boolean,
+        var fromFlowTracker: Boolean,
+        val kalmanX: AxisKalman,
+        val kalmanY: AxisKalman
     )
 
     private val tracks = linkedMapOf<Int, Track>()
@@ -58,7 +112,10 @@ internal class HybridTracker {
                     consecutiveHits = 1,
                     confirmed = false,
                     fromBrightnessTracker = observation.fromBrightnessTracker,
-                    fromMotionTracker = observation.fromMotionTracker
+                    fromMotionTracker = observation.fromMotionTracker,
+                    fromFlowTracker = observation.fromFlowTracker,
+                    kalmanX = AxisKalman(observation.normalizedBox.centerX()),
+                    kalmanY = AxisKalman(observation.normalizedBox.centerY())
                 )
             } else {
                 unmatchedTrackIds.remove(matchingTrack.stableId)
@@ -78,37 +135,11 @@ internal class HybridTracker {
             if (track.confirmed) missingFor > profile.holdMs else missingFor > 500L
         }
 
-        return tracks.values.mapNotNull { track ->
-            val requiredHits = requiredConfirmationHits(track)
-            if (!track.confirmed && track.consecutiveHits >= requiredHits) {
-                track.confirmed = true
-            }
-            if (!track.confirmed) return@mapNotNull null
-
-            val missingFor = now - track.lastSeenAt
-            val status = when {
-                missingFor == 0L -> TrackStatus.TRACKING
-                missingFor <= profile.predictionMs -> TrackStatus.PREDICTED
-                else -> TrackStatus.LOST
-            }
-            val confidenceDecay = if (missingFor == 0L) 1f else {
-                (1f - missingFor.toFloat() / profile.holdMs.toFloat()).coerceIn(0.15f, 1f)
-            }
-
-            DetectionTarget(
-                trackingId = track.stableId,
-                label = track.label,
-                confidence = track.confidence * confidenceDecay,
-                normalizedBox = RectF(track.box),
-                status = status,
-                missingForMs = missingFor,
-                velocityX = track.velocityX,
-                velocityY = track.velocityY,
-                fromBrightnessTracker = track.fromBrightnessTracker,
-                fromMotionTracker = track.fromMotionTracker
-            )
-        }.sortedBy { it.trackingId }
+        return buildTargets(now)
     }
+
+    @Synchronized
+    fun snapshot(now: Long): List<DetectionTarget> = buildTargets(now)
 
     @Synchronized
     fun reset() {
@@ -116,7 +147,40 @@ internal class HybridTracker {
         nextStableId = 1
     }
 
+    private fun buildTargets(now: Long): List<DetectionTarget> = tracks.values.mapNotNull { track ->
+        val requiredHits = requiredConfirmationHits(track)
+        if (!track.confirmed && track.consecutiveHits >= requiredHits) {
+            track.confirmed = true
+        }
+        if (!track.confirmed) return@mapNotNull null
+
+        val missingFor = now - track.lastSeenAt
+        val status = when {
+            missingFor == 0L -> TrackStatus.TRACKING
+            missingFor <= profile.predictionMs -> TrackStatus.PREDICTED
+            else -> TrackStatus.LOST
+        }
+        val confidenceDecay = if (missingFor == 0L) 1f else {
+            (1f - missingFor.toFloat() / profile.holdMs.toFloat()).coerceIn(0.15f, 1f)
+        }
+
+        DetectionTarget(
+            trackingId = track.stableId,
+            label = track.label,
+            confidence = track.confidence * confidenceDecay,
+            normalizedBox = RectF(track.box),
+            status = status,
+            missingForMs = missingFor,
+            velocityX = track.velocityX,
+            velocityY = track.velocityY,
+            fromBrightnessTracker = track.fromBrightnessTracker,
+            fromMotionTracker = track.fromMotionTracker,
+            fromFlowTracker = track.fromFlowTracker
+        )
+    }.sortedBy { it.trackingId }
+
     private fun requiredConfirmationHits(track: Track): Int = when {
+        track.fromFlowTracker -> 1
         track.fromMotionTracker -> 2
         track.fromBrightnessTracker -> 2
         track.label in FAST_CONFIRM_LABELS -> 2
@@ -128,6 +192,9 @@ internal class HybridTracker {
         availableIds: Set<Int>
     ): Track? {
         if (observation.sourceTrackingId != null) {
+            // Local flow uses our stable id as a direct hint. Legacy sources may still
+            // provide their own source id, so support both forms.
+            tracks[observation.sourceTrackingId]?.takeIf { it.stableId in availableIds }?.let { return it }
             tracks.values.firstOrNull {
                 it.stableId in availableIds && it.sourceTrackingId == observation.sourceTrackingId
             }?.let { return it }
@@ -145,6 +212,7 @@ internal class HybridTracker {
             if (track.label == observation.label) score += 0.25f
             if (track.fromBrightnessTracker == observation.fromBrightnessTracker) score += 0.10f
             if (track.fromMotionTracker == observation.fromMotionTracker) score += 0.18f
+            if (track.fromFlowTracker == observation.fromFlowTracker) score += 0.16f
             if (score > bestScore) {
                 bestScore = score
                 best = track
@@ -154,56 +222,72 @@ internal class HybridTracker {
     }
 
     private fun updateObservedTrack(track: Track, observation: RawObservation, now: Long) {
-        val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.6f)
-        val previousCenterX = track.box.centerX()
-        val previousCenterY = track.box.centerY()
-        val measuredVelocityX = (observation.normalizedBox.centerX() - previousCenterX) / dtSeconds
-        val measuredVelocityY = (observation.normalizedBox.centerY() - previousCenterY) / dtSeconds
+        val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.35f)
+        track.kalmanX.predict(dtSeconds)
+        track.kalmanY.predict(dtSeconds)
 
-        track.velocityX = track.velocityX * 0.58f + measuredVelocityX * 0.42f
-        track.velocityY = track.velocityY * 0.58f + measuredVelocityY * 0.42f
-        track.box = lerpRect(track.box, observation.normalizedBox, profile.smoothing)
-        track.sourceTrackingId = observation.sourceTrackingId ?: track.sourceTrackingId
+        // Flow/template matches are noisier than YOLO boxes; semantic detections get
+        // a stronger correction while local tracking remains smooth.
+        val measurementNoise = when {
+            observation.fromMotionTracker -> 0.050f
+            observation.fromBrightnessTracker -> 0.045f
+            observation.fromFlowTracker -> 0.030f
+            else -> 0.012f
+        }
+        track.kalmanX.correct(observation.normalizedBox.centerX(), measurementNoise)
+        track.kalmanY.correct(observation.normalizedBox.centerY(), measurementNoise)
 
-        // A semantic YOLO label wins over a generic motion label when both channels converge.
-        if (track.fromMotionTracker && !observation.fromMotionTracker && observation.label != "MOTION") {
-            track.label = observation.label
-        } else if (!track.fromMotionTracker || observation.fromMotionTracker) {
+        track.velocityX = track.kalmanX.velocity
+        track.velocityY = track.kalmanY.velocity
+
+        val width = track.box.width() + (observation.normalizedBox.width() - track.box.width()) * profile.smoothing
+        val height = track.box.height() + (observation.normalizedBox.height() - track.box.height()) * profile.smoothing
+        track.box = centeredAndClamp(track.kalmanX.position, track.kalmanY.position, width, height)
+        track.sourceTrackingId = if (observation.fromFlowTracker) track.sourceTrackingId else observation.sourceTrackingId ?: track.sourceTrackingId
+
+        // Local flow carries the remembered semantic label; generic motion should
+        // never overwrite an already-known YOLO class.
+        if (!observation.fromMotionTracker || track.label == "MOTION") {
             track.label = observation.label
         }
 
-        track.confidence = maxOf(track.confidence * 0.72f, observation.confidence)
+        track.confidence = if (observation.fromFlowTracker) {
+            maxOf(track.confidence * 0.96f, observation.confidence)
+        } else {
+            maxOf(track.confidence * 0.72f, observation.confidence)
+        }
         track.lastSeenAt = now
         track.updatedAt = now
         track.hits += 1
         track.consecutiveHits += 1
         track.fromBrightnessTracker = observation.fromBrightnessTracker
         track.fromMotionTracker = observation.fromMotionTracker
+        track.fromFlowTracker = observation.fromFlowTracker
     }
 
     private fun predictMissingTrack(track: Track, now: Long) {
         val dtSeconds = ((now - track.updatedAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.25f)
         val age = now - track.lastSeenAt
         if (age <= profile.holdMs) {
-            track.box = shiftAndClamp(track.box, track.velocityX * dtSeconds, track.velocityY * dtSeconds)
-            track.velocityX *= 0.86f
-            track.velocityY *= 0.86f
+            track.kalmanX.predict(dtSeconds)
+            track.kalmanY.predict(dtSeconds)
+            track.velocityX = track.kalmanX.velocity
+            track.velocityY = track.kalmanY.velocity
+            track.box = centeredAndClamp(
+                track.kalmanX.position,
+                track.kalmanY.position,
+                track.box.width(),
+                track.box.height()
+            )
             track.updatedAt = now
         }
     }
 
-    private fun lerpRect(from: RectF, to: RectF, amount: Float): RectF = RectF(
-        from.left + (to.left - from.left) * amount,
-        from.top + (to.top - from.top) * amount,
-        from.right + (to.right - from.right) * amount,
-        from.bottom + (to.bottom - from.bottom) * amount
-    )
-
-    private fun shiftAndClamp(source: RectF, dx: Float, dy: Float): RectF {
-        val width = source.width().coerceIn(0.01f, 1f)
-        val height = source.height().coerceIn(0.01f, 1f)
-        val left = (source.left + dx).coerceIn(0f, 1f - width)
-        val top = (source.top + dy).coerceIn(0f, 1f - height)
+    private fun centeredAndClamp(cx: Float, cy: Float, widthIn: Float, heightIn: Float): RectF {
+        val width = widthIn.coerceIn(0.008f, 0.98f)
+        val height = heightIn.coerceIn(0.008f, 0.98f)
+        val left = (cx - width / 2f).coerceIn(0f, 1f - width)
+        val top = (cy - height / 2f).coerceIn(0f, 1f - height)
         return RectF(left, top, left + width, top + height)
     }
 
@@ -226,7 +310,8 @@ internal class HybridTracker {
     private companion object {
         val FAST_CONFIRM_LABELS = setOf(
             "PERSON", "CELL PHONE", "TV", "LAPTOP", "REMOTE", "CLOCK",
-            "CAT", "DOG", "BIRD", "HORSE", "SHEEP", "COW", "ELEPHANT", "BEAR", "ZEBRA", "GIRAFFE"
+            "CAT", "DOG", "BIRD", "HORSE", "SHEEP", "COW", "ELEPHANT", "BEAR", "ZEBRA", "GIRAFFE",
+            "CAR", "MOTORCYCLE", "AIRPLANE", "BUS", "TRAIN", "TRUCK", "BOAT"
         )
     }
 }
