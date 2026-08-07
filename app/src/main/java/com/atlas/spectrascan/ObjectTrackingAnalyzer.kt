@@ -28,6 +28,7 @@ class ObjectTrackingAnalyzer(
 
     @Volatile private var targetFilter: TargetFilter = TargetFilter.ALL
     @Volatile private var digitalGain: Float = 1.0f
+    @Volatile private var motionDetectionEnabled: Boolean = false
 
     fun setProfile(profile: TrackingProfile) { tracker.profile = profile }
 
@@ -40,6 +41,14 @@ class ObjectTrackingAnalyzer(
     }
 
     fun setDigitalGain(gain: Float) { digitalGain = gain.coerceIn(1.0f, 2.4f) }
+
+    fun setMotionDetectionEnabled(enabled: Boolean) {
+        if (motionDetectionEnabled != enabled) {
+            motionDetectionEnabled = enabled
+            motionDetector.reset()
+            tracker.reset()
+        }
+    }
 
     override fun analyze(imageProxy: ImageProxy) {
         if (!busy.compareAndSet(false, true)) { imageProxy.close(); return }
@@ -55,7 +64,7 @@ class ObjectTrackingAnalyzer(
             val lowLight = meanLuma < 58f
             val nightVisionSuggested = meanLuma < 40f
 
-            val motionResult = if (activeFilter == TargetFilter.ALL || activeFilter == TargetFilter.MOTION) {
+            val motionResult = if (motionDetectionEnabled) {
                 motionDetector.analyze(imageProxy, rotation)
             } else {
                 motionDetector.reset()
@@ -63,7 +72,8 @@ class ObjectTrackingAnalyzer(
             }
             val motionObservations = motionResult.observations
 
-            // MOTION mode is intentionally YOLO-free: cheap, responsive, class-agnostic tracking.
+            // Backwards compatibility only: an old saved MOTION filter behaves like
+            // class-agnostic motion mode, but the UI no longer cycles into this value.
             if (activeFilter == TargetFilter.MOTION) {
                 val now = SystemClock.elapsedRealtime()
                 dispatchFrame(
@@ -73,7 +83,7 @@ class ObjectTrackingAnalyzer(
                     startedAt = startedAt,
                     now = now,
                     brightTrackerActive = false,
-                    motionTrackerActive = motionResult.active,
+                    motionTrackerActive = motionDetectionEnabled && motionResult.active,
                     activeFilter = activeFilter,
                     rejectedCandidates = 0,
                     meanLuma = meanLuma,
@@ -95,7 +105,7 @@ class ObjectTrackingAnalyzer(
             val throttled = minYoloInterval > 0L && nowBeforeYolo - lastYoloAt < minYoloInterval
 
             if (throttled) {
-                val hasMotion = motionObservations.isNotEmpty()
+                val hasMotion = motionDetectionEnabled && motionObservations.isNotEmpty()
                 dispatchFrame(
                     targets = if (hasMotion) tracker.update(motionObservations, nowBeforeYolo) else emptyList(),
                     orientedWidth = orientedWidth,
@@ -103,7 +113,7 @@ class ObjectTrackingAnalyzer(
                     startedAt = startedAt,
                     now = nowBeforeYolo,
                     brightTrackerActive = false,
-                    motionTrackerActive = motionResult.active,
+                    motionTrackerActive = motionDetectionEnabled && motionResult.active,
                     activeFilter = activeFilter,
                     rejectedCandidates = 0,
                     meanLuma = meanLuma,
@@ -141,10 +151,15 @@ class ObjectTrackingAnalyzer(
                 )
             }.toMutableList()
 
-            // Motion is complementary. If YOLO already covers the same object, keep the semantic YOLO box.
-            motionObservations.forEach { motion ->
-                val overlapsSemantic = observations.any { intersectionOverUnion(it.normalizedBox, motion.normalizedBox) > 0.18f }
-                if (!overlapsSemantic) observations += motion
+            if (motionDetectionEnabled) {
+                // Motion is complementary. If YOLO already covers the same object,
+                // keep the semantic YOLO box instead of drawing a duplicate MOTION box.
+                motionObservations.forEach { motion ->
+                    val overlapsSemantic = observations.any {
+                        intersectionOverUnion(it.normalizedBox, motion.normalizedBox) > 0.18f
+                    }
+                    if (!overlapsSemantic) observations += motion
+                }
             }
 
             if (brightObservation != null && observations.none {
@@ -161,7 +176,7 @@ class ObjectTrackingAnalyzer(
                 startedAt = startedAt,
                 now = now,
                 brightTrackerActive = brightObservation != null,
-                motionTrackerActive = motionResult.active,
+                motionTrackerActive = motionDetectionEnabled && motionResult.active,
                 activeFilter = activeFilter,
                 rejectedCandidates = rejectedCandidates,
                 meanLuma = meanLuma,
