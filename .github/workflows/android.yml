@@ -21,6 +21,15 @@ jobs:
       - name: Install SDK 36
         shell: pwsh
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Download YOLO11n ONNX model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force 'app/src/main/assets' | Out-Null
+          $url = 'https://huggingface.co/webnn/yolo11n/resolve/main/onnx/yolo11n.onnx?download=true'
+          curl.exe -L --fail --retry 3 --retry-delay 2 -o 'app/src/main/assets/yolo11n.onnx' $url
+          $size = (Get-Item 'app/src/main/assets/yolo11n.onnx').Length
+          if ($size -lt 5000000) { throw "YOLO model download looks invalid: $size bytes" }
+          Write-Host "YOLO model ready: $size bytes"
       - name: Restore stable debug signing key
         shell: pwsh
         run: |
