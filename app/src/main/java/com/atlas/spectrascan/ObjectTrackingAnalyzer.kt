@@ -14,8 +14,8 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
     private val busy=AtomicBoolean(false);private val tracker=HybridTracker();private val motionDetector=MotionFlowDetector();private val semanticFlow=SemanticFlowTracker();private val presentationSmoother=PresentationTargetSmoother();private val yoloDetector=lazy{YoloDetector(SpectraScanApplication.appContext)}
     private var lastResultAt=0L;private var lastYoloAt=0L;private var previousYoloAt=0L;private var lastYoloMs=0L;private var lastYoloFps=0;private var lastTargets:List<DetectionTarget> = emptyList();private var lastZoomGeneration=0L
     @Volatile private var targetFilter=TargetFilter.ALL;@Volatile private var digitalGain=1f;@Volatile private var motionDetectionEnabled=false
-    @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false
-    fun setProfile(profile:TrackingProfile){tracker.profile=profile}
+    @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false;@Volatile private var powerProfile=TrackingProfile.BALANCED
+    fun setProfile(profile:TrackingProfile){powerProfile=profile;tracker.profile=profile}
     fun setTargetFilter(filter:TargetFilter){
         if(targetFilter!=filter){
             targetFilter=filter
@@ -35,18 +35,17 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
 
             val zoomGeneration=ZoomBoostSignal.generation()
             val zoomGeometryChanged=zoomGeneration!=lastZoomGeneration
-            if(zoomGeometryChanged){
-                lastZoomGeneration=zoomGeneration;semanticFlow.reset();presentationSmoother.reset();lastYoloAt=0L
-            }
+            if(zoomGeometryChanged){lastZoomGeneration=zoomGeneration;semanticFlow.reset();presentationSmoother.reset();lastYoloAt=0L}
             val zoomBoost=ZoomBoostSignal.isActive(now)
 
             val useMotion=motionDetectionEnabled||skyWatchEnabled
             val motionResult=if(useMotion)motionDetector.analyze(imageProxy,rotation) else MotionFlowDetector.Result(emptyList(),0f,0f,false)
-            val flowResult=if(zoomBoost) SemanticFlowTracker.Result(emptyList(),false,0f,false) else semanticFlow.track(imageProxy,rotation,now)
+            val allowFlow=powerProfile!=TrackingProfile.RESPONSIVE || !zoomBoost
+            val flowResult=if(zoomBoost||!allowFlow) SemanticFlowTracker.Result(emptyList(),false,0f,false) else semanticFlow.track(imageProxy,rotation,now)
             if(activeFilter==TargetFilter.MOTION&&!skyWatchEnabled){val targets=tracker.update(motionResult.observations,now);lastTargets=targets;dispatchFrame(targets,orientedWidth,orientedHeight,now,false,useMotion&&motionResult.active,false,activeFilter,0,meanLuma,lowLight,nightVisionSuggested,true);return}
 
             val yoloInterval=adaptiveYoloInterval(meanLuma,flowResult,lastTargets,useMotion&&motionResult.active,zoomBoost)
-            val yoloDue=zoomBoost||lastYoloAt==0L||flowResult.needsYoloRecheck||now-lastYoloAt>=yoloInterval
+            val yoloDue=zoomBoost||powerProfile==TrackingProfile.RESPONSIVE||lastYoloAt==0L||flowResult.needsYoloRecheck||now-lastYoloAt>=yoloInterval
             if(!yoloDue){
                 val observations=mergeLightweightObservations(flowResult.observations,if(useMotion)motionResult.observations else emptyList())
                 val targets=tracker.update(observations,now);lastTargets=targets
@@ -69,17 +68,20 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
     }
 
     private fun adaptiveYoloInterval(meanLuma:Float,flow:SemanticFlowTracker.Result,targets:List<DetectionTarget>,motionActive:Boolean,zoomBoost:Boolean):Long{
-        if(zoomBoost)return 0L
-        if(flow.needsYoloRecheck)return if(meanLuma<30)420L else 180L
-        if(skyWatchEnabled){
-            val base=when{motionActive->260L;targets.any{it.label=="UNKNOWN"}->320L;stationaryCamera->700L;else->520L}
-            val low=when{meanLuma<22->850L;meanLuma<38->620L;meanLuma<58->380L;else->0L};return maxOf(base,low)
+        if(zoomBoost||powerProfile==TrackingProfile.RESPONSIVE)return 0L
+        if(powerProfile==TrackingProfile.SMOOTH){
+            if(flow.needsYoloRecheck)return if(meanLuma<35)700L else 420L
+            if(skyWatchEnabled){val base=when{motionActive->520L;targets.any{it.label=="UNKNOWN"}->620L;else->1_050L};val low=when{meanLuma<30->1_300L;meanLuma<55->900L;else->0L};return maxOf(base,low)}
+            val base=when{targets.isEmpty()->1_000L;targets.any{it.status==TrackStatus.PREDICTED||it.status==TrackStatus.LOST}->520L;flow.active&&flow.averageScore>=.78f->1_150L;else->760L}
+            val low=when{meanLuma<25->1_350L;meanLuma<45->950L;meanLuma<65->720L;else->0L};return maxOf(base,low)
         }
+        if(flow.needsYoloRecheck)return if(meanLuma<30)420L else 180L
+        if(skyWatchEnabled){val base=when{motionActive->260L;targets.any{it.label=="UNKNOWN"}->320L;stationaryCamera->700L;else->520L};val low=when{meanLuma<22->850L;meanLuma<38->620L;meanLuma<58->380L;else->0L};return maxOf(base,low)}
         val interval=when{targets.isEmpty()->if(motionActive)300L else 420L;targets.any{it.status==TrackStatus.PREDICTED||it.status==TrackStatus.LOST}->220L;flow.active&&flow.averageScore>=.82f->650L;flow.active&&flow.averageScore>=.72f->480L;else->300L}
         val lowFloor=when{meanLuma<22->700L;meanLuma<38->480L;meanLuma<58->300L;else->0L};return maxOf(interval,lowFloor)
     }
     private fun mergeLightweightObservations(flow:List<RawObservation>,motion:List<RawObservation>):List<RawObservation>{if(flow.isEmpty())return motion;if(motion.isEmpty())return flow;val merged=flow.toMutableList();motion.forEach{c->if(merged.none{intersectionOverUnion(it.normalizedBox,c.normalizedBox)>.16f})merged+=c};return merged}
-    private fun dispatchFrame(targets:List<DetectionTarget>,w:Int,h:Int,now:Long,bright:Boolean,motion:Boolean,flow:Boolean,filter:TargetFilter,rejected:Int,luma:Float,low:Boolean,nv:Boolean,throttled:Boolean){lastResultAt=now;val presented=presentationSmoother.apply(targets,now);val frame=DetectionFrame(presented,w,h,lastYoloFps,lastYoloMs,bright,motion,flow,filter,rejected,luma,low,nv,throttled);callbackExecutor.execute{onFrame(frame)}}
+    private fun dispatchFrame(targets:List<DetectionTarget>,w:Int,h:Int,now:Long,bright:Boolean,motion:Boolean,flow:Boolean,filter:TargetFilter,rejected:Int,luma:Float,low:Boolean,nv:Boolean,throttled:Boolean){lastResultAt=now;val presented=presentationSmoother.apply(targets,now);val frame=DetectionFrame(presented,w,h,lastYoloFps,lastYoloMs,bright,motion,flow,filter,rejected,luma,low,nv,throttled,now);callbackExecutor.execute{onFrame(frame)}}
     private fun rotateBitmap(source:Bitmap,rotation:Int):Bitmap{if(rotation==0)return source;val m=Matrix().apply{postRotate(rotation.toFloat())};return Bitmap.createBitmap(source,0,0,source.width,source.height,m,true)}
     private fun calculateMeanLuma(image:ImageProxy):Float{val p=image.planes.firstOrNull()?:return 255f;val b=p.buffer.duplicate();var sum=0L;var n=0;var y=0;while(y<image.height){var x=0;while(x<image.width){val i=y*p.rowStride+x*p.pixelStride;if(i<b.limit()){sum+=b.get(i).toInt()and 255;n++};x+=8};y+=8};return if(n==0)255f else sum.toFloat()/n}
     private fun findBrightRegion(image:ImageProxy,rotation:Int,mean:Float):RawObservation?{val p=image.planes.firstOrNull()?:return null;val b=p.buffer.duplicate();val width=image.width;val height=image.height;if(mean>110)return null;val threshold=maxOf(182f,mean+72).toInt();var minX=width;var minY=height;var maxX=-1;var maxY=-1;var count=0;var samples=0;var y=0;while(y<height){var x=0;while(x<width){val i=y*p.rowStride+x*p.pixelStride;if(i<b.limit()){samples++;if((b.get(i).toInt()and 255)>=threshold){minX=minOf(minX,x);minY=minOf(minY,y);maxX=maxOf(maxX,x);maxY=maxOf(maxY,y);count++}};x+=4};y+=4};if(samples==0)return null;val ratio=count.toFloat()/samples;if(maxX<=minX||maxY<=minY||ratio !in .0015f.. .10f)return null;val raw=RectF((minX.toFloat()/width-.02f).coerceIn(0f,1f),(minY.toFloat()/height-.02f).coerceIn(0f,1f),(maxX.toFloat()/width+.02f).coerceIn(0f,1f),(maxY.toFloat()/height+.02f).coerceIn(0f,1f));val r=rotateNormalizedRect(raw,rotation);val area=r.width()*r.height();if(r.width() !in .02f.. .55f||r.height() !in .02f.. .55f||area !in .0008f.. .16f)return null;return RawObservation(null,"BRIGHT OBJECT",(.48f+ratio*3.5f).coerceIn(.48f,.90f),r,fromBrightnessTracker=true)}
