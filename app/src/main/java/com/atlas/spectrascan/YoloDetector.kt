@@ -2,6 +2,10 @@ package com.atlas.spectrascan
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
@@ -20,12 +24,25 @@ internal data class YoloDetection(
 internal class YoloDetector(context: Context) : AutoCloseable {
     private val environment = OrtEnvironment.getEnvironment()
     private val sessionOptions = OrtSession.SessionOptions().apply {
-        setIntraOpNumThreads(4)
+        // Two worker threads are a better sustained-power tradeoff on phones than
+        // keeping four big CPU cores busy for every inference.
+        setIntraOpNumThreads(2)
         setInterOpNumThreads(1)
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
     }
     private val session: OrtSession
     private val inputName: String
+
+    // Reused inference memory: avoid allocating a new 640x640 bitmap, pixel array
+    // and ~4.9 MB float buffer several times per second.
+    private val scaledBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+    private val scaledCanvas = Canvas(scaledBitmap)
+    private val scalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
+    private val inputBuffer = ByteBuffer
+        .allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * Float.SIZE_BYTES)
+        .order(ByteOrder.nativeOrder())
+        .asFloatBuffer()
 
     init {
         val modelBytes = context.assets.open(MODEL_FILE).use { it.readBytes() }
@@ -33,28 +50,33 @@ internal class YoloDetector(context: Context) : AutoCloseable {
         inputName = session.inputNames.first()
     }
 
-    fun detect(bitmap: Bitmap, filter: TargetFilter): Pair<List<YoloDetection>, Int> {
+    @Synchronized
+    fun detect(bitmap: Bitmap, filter: TargetFilter, gain: Float = 1f): Pair<List<YoloDetection>, Int> {
         if (filter == TargetFilter.MOTION) return emptyList<YoloDetection>() to 0
-        val scaled = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        scaled.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
-        val floatBuffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * 3 * Float.SIZE_BYTES)
-            .order(ByteOrder.nativeOrder()).asFloatBuffer()
+        scaledCanvas.drawColor(Color.BLACK)
+        scaledCanvas.drawBitmap(bitmap, null, Rect(0, 0, INPUT_SIZE, INPUT_SIZE), scalePaint)
+        scaledBitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
+        val effectiveGain = gain.coerceIn(1f, 2.4f)
+        inputBuffer.clear()
         for (channel in 0..2) {
             for (pixel in pixels) {
-                val value = when (channel) {
+                val raw = when (channel) {
                     0 -> (pixel shr 16) and 0xFF
                     1 -> (pixel shr 8) and 0xFF
                     else -> pixel and 0xFF
                 }
-                floatBuffer.put(value / 255f)
+                inputBuffer.put((raw * effectiveGain).coerceAtMost(255f) / 255f)
             }
         }
-        floatBuffer.rewind()
+        inputBuffer.flip()
 
-        val tensor = OnnxTensor.createTensor(environment, floatBuffer, longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong()))
+        val tensor = OnnxTensor.createTensor(
+            environment,
+            inputBuffer,
+            longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
+        )
         var rejected = 0
         val candidates = mutableListOf<YoloDetection>()
         tensor.use { input ->
@@ -151,7 +173,11 @@ internal class YoloDetector(context: Context) : AutoCloseable {
         return if (union <= 0f) 0f else intersection / union
     }
 
-    override fun close() { session.close(); sessionOptions.close() }
+    override fun close() {
+        session.close()
+        sessionOptions.close()
+        scaledBitmap.recycle()
+    }
 
     private companion object {
         const val MODEL_FILE = "yolo11n.onnx"
