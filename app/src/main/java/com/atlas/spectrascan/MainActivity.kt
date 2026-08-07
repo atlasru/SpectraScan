@@ -114,6 +114,7 @@ private fun SpectraScanApp() {
 private fun ScannerScreen() {
     var mode by remember { mutableStateOf(ScanMode.TAC) }
     var profile by remember { mutableStateOf(TrackingProfile.BALANCED) }
+    var targetFilter by remember { mutableStateOf(TargetFilter.ALL) }
     var frame by remember { mutableStateOf(DetectionFrame()) }
     var lockedId by remember { mutableStateOf<Int?>(null) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
@@ -145,6 +146,7 @@ private fun ScannerScreen() {
         CameraPreview(
             modifier = Modifier.fillMaxSize(),
             profile = profile,
+            targetFilter = targetFilter,
             onPreviewReady = { previewView = it },
             onFrame = { frame = it }
         )
@@ -171,16 +173,17 @@ private fun ScannerScreen() {
                 .padding(top = 14.dp, start = 14.dp, end = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("SPECTRASCAN 0.3 // ${mode.title}", color = mode.tint, fontSize = 15.sp)
+            Text("SPECTRASCAN 0.3.1 // ${mode.title}", color = mode.tint, fontSize = 15.sp)
             Text(
                 "DET ${frame.inferenceFps.toString().padStart(2, '0')} FPS  " +
                     "${frame.inferenceMs} MS  " +
-                    "TARGETS ${frame.targets.size.toString().padStart(2, '0')}",
+                    "TARGETS ${frame.targets.size.toString().padStart(2, '0')}  " +
+                    "DROP ${frame.rejectedCandidates}",
                 color = mode.tint.copy(alpha = 0.86f),
                 fontSize = 10.sp
             )
             Text(
-                "$globalStatus  //  ${profile.title}" +
+                "$globalStatus  //  ${profile.title}  //  ${frame.targetFilter.title}" +
                     if (frame.brightTrackerActive) "  //  BRT" else "  //  ML",
                 color = statusColor(lockedTarget?.status, mode.tint),
                 fontSize = 10.sp
@@ -222,6 +225,16 @@ private fun ScannerScreen() {
                 ) {
                     profile = profile.next()
                 }
+            }
+
+            ControlChip(
+                text = "FILTER ${targetFilter.title}",
+                color = mode.tint,
+                enabled = true,
+                selected = true
+            ) {
+                lockedId = null
+                targetFilter = targetFilter.next()
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -266,6 +279,7 @@ private fun ControlChip(
 private fun CameraPreview(
     modifier: Modifier = Modifier,
     profile: TrackingProfile,
+    targetFilter: TargetFilter,
     onPreviewReady: (PreviewView) -> Unit,
     onFrame: (DetectionFrame) -> Unit
 ) {
@@ -281,6 +295,10 @@ private fun CameraPreview(
 
     LaunchedEffect(profile) {
         analyzer.setProfile(profile)
+    }
+
+    LaunchedEffect(targetFilter) {
+        analyzer.setTargetFilter(targetFilter)
     }
 
     AndroidView(
@@ -422,7 +440,8 @@ private fun TrackingHud(
             val percent = if (target.confidence > 0f) {
                 " ${(target.confidence * 100).toInt()}%"
             } else ""
-            val label = "${target.status.name} // ${target.label}$percent // #${target.trackingId}"
+            val source = if (target.fromBrightnessTracker) "BRT" else "ML"
+            val label = "${target.status.name} // $source // ${target.label}$percent // #${target.trackingId}"
             labelPaint.color = targetColor.toArgb()
             drawContext.canvas.nativeCanvas.drawText(
                 label,
@@ -464,7 +483,7 @@ private fun DrawScope.drawRadar(
     lockedId: Int?
 ) {
     val radius = 70f
-    val center = Offset(size.width - 92f, size.height - 235f)
+    val center = Offset(size.width - 92f, size.height - 285f)
     drawCircle(Color.Black.copy(alpha = 0.52f), radius + 10f, center)
     drawCircle(color, radius, center, style = Stroke(3f))
     drawCircle(color.copy(alpha = 0.65f), radius / 2f, center, style = Stroke(2f))
