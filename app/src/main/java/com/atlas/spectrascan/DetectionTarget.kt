@@ -4,8 +4,14 @@ import android.graphics.RectF
 
 enum class TrackStatus { ACQUIRING, TRACKING, PREDICTED, LOST }
 
+/**
+ * User-facing performance modes. Enum names are kept for compatibility with
+ * older builds, while their titles now describe the actual device workload.
+ */
 enum class TrackingProfile(val title:String,val smoothing:Float,val holdMs:Long,val predictionMs:Long){
-    SMOOTH("SMOOTH",0.28f,1_300L,650L),BALANCED("BALANCED",0.46f,950L,500L),RESPONSIVE("FAST",0.72f,650L,330L);
+    SMOOTH("LOW BATTERY",0.24f,1_500L,720L),
+    BALANCED("BALANCED",0.46f,950L,500L),
+    RESPONSIVE("FULL PERFORMANCE",0.76f,560L,280L);
     fun next():TrackingProfile=entries[(ordinal+1)%entries.size]
 }
 
