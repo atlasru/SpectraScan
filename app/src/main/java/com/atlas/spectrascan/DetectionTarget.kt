@@ -52,5 +52,9 @@ data class DetectionFrame(
     val inferenceMs: Long = 0L,
     val brightTrackerActive: Boolean = false,
     val targetFilter: TargetFilter = TargetFilter.ALL,
-    val rejectedCandidates: Int = 0
+    val rejectedCandidates: Int = 0,
+    val meanLuma: Float = 255f,
+    val lowLight: Boolean = false,
+    val nightVisionSuggested: Boolean = false,
+    val detectionThrottled: Boolean = false
 )
