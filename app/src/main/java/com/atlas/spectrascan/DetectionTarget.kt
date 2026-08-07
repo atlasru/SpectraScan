@@ -45,7 +45,8 @@ data class DetectionTarget(
     val velocityX: Float = 0f,
     val velocityY: Float = 0f,
     val fromBrightnessTracker: Boolean = false,
-    val fromMotionTracker: Boolean = false
+    val fromMotionTracker: Boolean = false,
+    val fromFlowTracker: Boolean = false
 )
 
 data class DetectionFrame(
@@ -56,6 +57,7 @@ data class DetectionFrame(
     val inferenceMs: Long = 0L,
     val brightTrackerActive: Boolean = false,
     val motionTrackerActive: Boolean = false,
+    val hybridFlowActive: Boolean = false,
     val targetFilter: TargetFilter = TargetFilter.ALL,
     val rejectedCandidates: Int = 0,
     val meanLuma: Float = 255f,
