@@ -1,13 +1,11 @@
 package com.atlas.spectrascan
 
+import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.graphics.RectF
 import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.objects.ObjectDetection
-import com.google.mlkit.vision.objects.defaults.ObjectDetectorOptions
-import java.util.Locale
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -19,18 +17,11 @@ class ObjectTrackingAnalyzer(
 
     private val busy = AtomicBoolean(false)
     private val tracker = HybridTracker()
+    private val yoloDetector = lazy { YoloDetector(SpectraScanApplication.appContext) }
     private var lastResultAt = 0L
 
     @Volatile
     private var targetFilter: TargetFilter = TargetFilter.ALL
-
-    private val detector = ObjectDetection.getClient(
-        ObjectDetectorOptions.Builder()
-            .setDetectorMode(ObjectDetectorOptions.STREAM_MODE)
-            .enableMultipleObjects()
-            .enableClassification()
-            .build()
-    )
 
     fun setProfile(profile: TrackingProfile) {
         tracker.profile = profile
@@ -49,146 +40,67 @@ class ObjectTrackingAnalyzer(
             return
         }
 
-        val mediaImage = imageProxy.image
-        if (mediaImage == null) {
-            busy.set(false)
-            imageProxy.close()
-            return
-        }
-
         val startedAt = SystemClock.elapsedRealtime()
         val rotation = imageProxy.imageInfo.rotationDegrees
         val orientedWidth = if (rotation == 90 || rotation == 270) imageProxy.height else imageProxy.width
         val orientedHeight = if (rotation == 90 || rotation == 270) imageProxy.width else imageProxy.height
         val activeFilter = targetFilter
-        val brightObservation = if (activeFilter == TargetFilter.ALL || activeFilter == TargetFilter.SCREENS) {
-            findBrightRegion(imageProxy, rotation)
-        } else {
-            null
-        }
-        val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
 
-        detector.process(inputImage)
-            .addOnSuccessListener(callbackExecutor) { detectedObjects ->
-                val now = SystemClock.elapsedRealtime()
-                val rawObservations = mutableListOf<RawObservation>()
-                var rejectedCandidates = 0
+        try {
+            val brightObservation = if (activeFilter == TargetFilter.ALL || activeFilter == TargetFilter.SCREENS) {
+                findBrightRegion(imageProxy, rotation)
+            } else {
+                null
+            }
 
-                if (activeFilter != TargetFilter.SCREENS) {
-                    detectedObjects.forEach { detected ->
-                        val box = detected.boundingBox
-                        val bestLabel = detected.labels.maxByOrNull { it.confidence }
-                        val label = bestLabel?.text
-                            ?.takeIf { it.isNotBlank() }
-                            ?.uppercase(Locale.US)
-                            ?: "TARGET"
-                        val confidence = bestLabel?.confidence ?: 0f
-                        val normalizedBox = RectF(
-                            (box.left.toFloat() / orientedWidth).coerceIn(0f, 1f),
-                            (box.top.toFloat() / orientedHeight).coerceIn(0f, 1f),
-                            (box.right.toFloat() / orientedWidth).coerceIn(0f, 1f),
-                            (box.bottom.toFloat() / orientedHeight).coerceIn(0f, 1f)
-                        )
+            val cameraBitmap = imageProxy.toBitmap()
+            val orientedBitmap = rotateBitmap(cameraBitmap, rotation)
+            val (detections, rejectedCandidates) = yoloDetector.value.detect(orientedBitmap, activeFilter)
 
-                        if (acceptMlObservation(label, confidence, normalizedBox, activeFilter)) {
-                            rawObservations += RawObservation(
-                                sourceTrackingId = detected.trackingId,
-                                label = label,
-                                confidence = confidence,
-                                normalizedBox = normalizedBox,
-                                fromBrightnessTracker = false
-                            )
-                        } else {
-                            rejectedCandidates++
-                        }
-                    }
-                } else {
-                    rejectedCandidates += detectedObjects.size
-                }
-
-                if (brightObservation != null && rawObservations.none {
-                        intersectionOverUnion(it.normalizedBox, brightObservation.normalizedBox) > 0.28f
-                    }
-                ) {
-                    rawObservations += brightObservation
-                }
-
-                dispatchFrame(
-                    targets = tracker.update(rawObservations, now),
-                    orientedWidth = orientedWidth,
-                    orientedHeight = orientedHeight,
-                    startedAt = startedAt,
-                    now = now,
-                    brightTrackerActive = brightObservation != null,
-                    activeFilter = activeFilter,
-                    rejectedCandidates = rejectedCandidates
+            val observations = detections.map { detection ->
+                RawObservation(
+                    sourceTrackingId = null,
+                    label = detection.label,
+                    confidence = detection.confidence,
+                    normalizedBox = detection.normalizedBox,
+                    fromBrightnessTracker = false
                 )
-            }
-            .addOnFailureListener(callbackExecutor) {
-                val now = SystemClock.elapsedRealtime()
-                val fallback = brightObservation?.let(::listOf).orEmpty()
-                dispatchFrame(
-                    targets = tracker.update(fallback, now),
-                    orientedWidth = orientedWidth,
-                    orientedHeight = orientedHeight,
-                    startedAt = startedAt,
-                    now = now,
-                    brightTrackerActive = brightObservation != null,
-                    activeFilter = activeFilter,
-                    rejectedCandidates = 0
-                )
-            }
-            .addOnCompleteListener(callbackExecutor) {
-                busy.set(false)
-                imageProxy.close()
-            }
-    }
+            }.toMutableList()
 
-    private fun acceptMlObservation(
-        label: String,
-        confidence: Float,
-        box: RectF,
-        filter: TargetFilter
-    ): Boolean {
-        if (!passesGeometryFilter(box, filter)) return false
+            if (brightObservation != null && observations.none {
+                    intersectionOverUnion(it.normalizedBox, brightObservation.normalizedBox) > 0.30f
+                }
+            ) {
+                observations += brightObservation
+            }
 
-        return when (filter) {
-            TargetFilter.SCREENS -> false
-            TargetFilter.PEOPLE -> label in PEOPLE_LABELS && confidence >= 0.55f
-            TargetFilter.ANIMALS -> label in ANIMAL_LABELS && confidence >= 0.55f
-            TargetFilter.OBJECTS -> when (label) {
-                "HOME GOOD" -> confidence >= 0.78f
-                "FASHION GOOD" -> confidence >= 0.75f
-                "FOOD" -> confidence >= 0.72f
-                "PLANT" -> confidence >= 0.82f
-                "PLACE" -> false
-                "TARGET" -> false
-                else -> confidence >= 0.72f
-            }
-            TargetFilter.ALL -> when (label) {
-                "HOME GOOD" -> confidence >= 0.92f
-                "FASHION GOOD" -> confidence >= 0.86f
-                "FOOD" -> confidence >= 0.82f
-                "PLANT", "PLACE", "TARGET" -> false
-                else -> confidence >= 0.78f
-            }
+            val now = SystemClock.elapsedRealtime()
+            dispatchFrame(
+                targets = tracker.update(observations, now),
+                orientedWidth = orientedWidth,
+                orientedHeight = orientedHeight,
+                startedAt = startedAt,
+                now = now,
+                brightTrackerActive = brightObservation != null,
+                activeFilter = activeFilter,
+                rejectedCandidates = rejectedCandidates
+            )
+        } catch (_: Throwable) {
+            val now = SystemClock.elapsedRealtime()
+            dispatchFrame(
+                targets = tracker.update(emptyList(), now),
+                orientedWidth = orientedWidth,
+                orientedHeight = orientedHeight,
+                startedAt = startedAt,
+                now = now,
+                brightTrackerActive = false,
+                activeFilter = activeFilter,
+                rejectedCandidates = 0
+            )
+        } finally {
+            busy.set(false)
+            imageProxy.close()
         }
-    }
-
-    private fun passesGeometryFilter(box: RectF, filter: TargetFilter): Boolean {
-        val width = box.width()
-        val height = box.height()
-        val area = width * height
-        if (width <= 0f || height <= 0f) return false
-        if (width < 0.025f || height < 0.025f || area < 0.0012f) return false
-
-        val maxSide = if (filter == TargetFilter.OBJECTS) 0.74f else 0.64f
-        val maxArea = if (filter == TargetFilter.OBJECTS) 0.36f else 0.26f
-        if (width > maxSide || height > maxSide || area > maxArea) return false
-
-        val aspect = width / height
-        if (aspect !in 0.18f..5.5f) return false
-        return true
     }
 
     private fun dispatchFrame(
@@ -207,18 +119,23 @@ class ObjectTrackingAnalyzer(
             (1000L / max(1L, frameDelta)).toInt().coerceIn(0, 60)
         }
 
-        onFrame(
-            DetectionFrame(
-                targets = targets,
-                imageWidth = orientedWidth,
-                imageHeight = orientedHeight,
-                inferenceFps = fps,
-                inferenceMs = now - startedAt,
-                brightTrackerActive = brightTrackerActive,
-                targetFilter = activeFilter,
-                rejectedCandidates = rejectedCandidates
-            )
+        val frame = DetectionFrame(
+            targets = targets,
+            imageWidth = orientedWidth,
+            imageHeight = orientedHeight,
+            inferenceFps = fps,
+            inferenceMs = now - startedAt,
+            brightTrackerActive = brightTrackerActive,
+            targetFilter = activeFilter,
+            rejectedCandidates = rejectedCandidates
         )
+        callbackExecutor.execute { onFrame(frame) }
+    }
+
+    private fun rotateBitmap(source: Bitmap, rotation: Int): Bitmap {
+        if (rotation == 0) return source
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
     private fun findBrightRegion(imageProxy: ImageProxy, rotation: Int): RawObservation? {
@@ -248,8 +165,8 @@ class ObjectTrackingAnalyzer(
         if (samples == 0) return null
 
         val mean = sum.toFloat() / samples
-        if (mean > 105f) return null
-        val threshold = maxOf(178f, mean + 68f).toInt()
+        if (mean > 110f) return null
+        val threshold = maxOf(182f, mean + 72f).toInt()
 
         var minX = width
         var minY = height
@@ -274,7 +191,7 @@ class ObjectTrackingAnalyzer(
         }
 
         val ratio = brightCount.toFloat() / samples.toFloat()
-        if (maxX <= minX || maxY <= minY || ratio !in 0.0015f..0.12f) return null
+        if (maxX <= minX || maxY <= minY || ratio !in 0.0015f..0.10f) return null
 
         val rawRect = RectF(
             (minX.toFloat() / width - 0.02f).coerceIn(0f, 1f),
@@ -284,15 +201,15 @@ class ObjectTrackingAnalyzer(
         )
         val orientedRect = rotateNormalizedRect(rawRect, rotation)
         val area = orientedRect.width() * orientedRect.height()
-        if (orientedRect.width() !in 0.025f..0.58f ||
-            orientedRect.height() !in 0.025f..0.58f ||
-            area !in 0.0012f..0.18f
+        if (orientedRect.width() !in 0.02f..0.55f ||
+            orientedRect.height() !in 0.02f..0.55f ||
+            area !in 0.0008f..0.16f
         ) return null
 
         return RawObservation(
             sourceTrackingId = null,
             label = "BRIGHT OBJECT",
-            confidence = (0.46f + ratio * 3.2f).coerceIn(0.46f, 0.88f),
+            confidence = (0.48f + ratio * 3.5f).coerceIn(0.48f, 0.90f),
             normalizedBox = orientedRect,
             fromBrightnessTracker = true
         )
@@ -318,13 +235,8 @@ class ObjectTrackingAnalyzer(
 
     override fun close() {
         tracker.reset()
-        detector.close()
-    }
-
-    private companion object {
-        val PEOPLE_LABELS = setOf("PERSON", "PEOPLE", "HUMAN")
-        val ANIMAL_LABELS = setOf(
-            "ANIMAL", "CAT", "DOG", "BIRD", "HORSE", "SHEEP", "COW", "BEAR"
-        )
+        if (yoloDetector.isInitialized()) {
+            yoloDetector.value.close()
+        }
     }
 }
