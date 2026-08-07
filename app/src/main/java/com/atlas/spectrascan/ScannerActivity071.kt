@@ -120,6 +120,7 @@ private fun Scanner071() {
     var monochrome by remember { mutableStateOf(false) }
     var gain by remember { mutableStateOf(1f) }
     var autoNv by remember { mutableStateOf(true) }
+    var motionDetectionEnabled by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
 
     val latestFrame by rememberUpdatedState(frame)
@@ -147,6 +148,7 @@ private fun Scanner071() {
         Camera071(
             modifier = Modifier.fillMaxSize(), profile = profile, filter = filter, zoom = zoom,
             exposure = exposure, monochrome = monochrome, gain = gain, nightVision = nightVision,
+            motionDetectionEnabled = motionDetectionEnabled,
             onZoomRange = { min, max ->
                 minZoom = min
                 maxZoom = max
@@ -178,6 +180,7 @@ private fun Scanner071() {
                 color = H071.copy(alpha = .88f), fontSize = 10.sp
             )
             Text("$globalStatus // ${frame.targetFilter.title} // LUMA ${frame.meanLuma.toInt()}", color = status071(locked?.status), fontSize = 10.sp)
+            if (motionDetectionEnabled) Text("MOTION DETECTION ON", color = H071.copy(alpha = .72f), fontSize = 9.sp)
             if (frame.lowLight) Text(if (nightVision) "LOW LIGHT // AUTO NIGHT VISION" else "LOW LIGHT", color = Color(0xFFFFB347), fontSize = 11.sp)
             if (zoom > 10f) Text("HIGH ZOOM // DETECTION MAY DEGRADE", color = Color(0xFFFFB347), fontSize = 9.sp)
         }
@@ -191,7 +194,7 @@ private fun Scanner071() {
             horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically
         ) {
             Quick071("LOCK", frame.targets.isNotEmpty()) { lockedId = nearest071(frame.targets)?.trackingId }
-            Quick071("MOTION", frame.targets.any { speed071(it) > .015f }) { lockedId = fastest071(frame.targets)?.trackingId }
+            Quick071("M-LOCK", frame.targets.any { speed071(it) > .015f }) { lockedId = fastest071(frame.targets)?.trackingId }
             Quick071("F:${filter.title}", true, selected = true) {
                 lockedId = null; trails = emptyMap(); filter = filter.next()
             }
@@ -203,12 +206,18 @@ private fun Scanner071() {
             zoom = zoom, minZoom = minZoom, maxZoom = maxZoom,
             exposure = exposure, gain = gain, monochrome = monochrome, autoNv = autoNv,
             profile = profile, trailsEnabled = trailsEnabled, trailsPresent = trails.isNotEmpty(),
+            motionDetectionEnabled = motionDetectionEnabled,
             onClose = { settingsOpen = false },
             onExposure = { exposure = it },
             onGain = { gain = it },
             onMonochrome = { monochrome = !monochrome },
             onAutoNv = { autoNv = !autoNv },
             onProfile = { profile = profile.next() },
+            onMotionDetection = {
+                motionDetectionEnabled = !motionDetectionEnabled
+                lockedId = null
+                trails = emptyMap()
+            },
             onTrails = { trailsEnabled = !trailsEnabled; if (!trailsEnabled) trails = emptyMap() },
             onClear = { trails = emptyMap() }
         )
@@ -219,10 +228,10 @@ private fun Scanner071() {
 private fun Settings071(
     zoom: Float, minZoom: Float, maxZoom: Float, exposure: Int, gain: Float,
     monochrome: Boolean, autoNv: Boolean, profile: TrackingProfile,
-    trailsEnabled: Boolean, trailsPresent: Boolean,
+    trailsEnabled: Boolean, trailsPresent: Boolean, motionDetectionEnabled: Boolean,
     onClose: () -> Unit, onExposure: (Int) -> Unit, onGain: (Float) -> Unit,
     onMonochrome: () -> Unit, onAutoNv: () -> Unit, onProfile: () -> Unit,
-    onTrails: () -> Unit, onClear: () -> Unit
+    onMotionDetection: () -> Unit, onTrails: () -> Unit, onClear: () -> Unit
 ) {
     Box(
         modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(226.dp)
@@ -248,6 +257,12 @@ private fun Settings071(
             Chip071(if (monochrome) "B/W ON" else "B/W OFF", true, monochrome, onClick = onMonochrome)
             Chip071(if (autoNv) "AUTO NIGHT VISION ON" else "AUTO NIGHT VISION OFF", true, autoNv, onClick = onAutoNv)
             Chip071("PROFILE ${profile.title}", true, onClick = onProfile)
+            Chip071(
+                if (motionDetectionEnabled) "MOTION DETECTION ON" else "MOTION DETECTION OFF",
+                true,
+                motionDetectionEnabled,
+                onClick = onMotionDetection
+            )
             Chip071(if (trailsEnabled) "MOTION TRAIL ON" else "MOTION TRAIL OFF", true, trailsEnabled, onClick = onTrails)
             Chip071("CLEAR TRAILS", trailsPresent, onClick = onClear)
             Text("ISP: SHARPEN + DNR + STABILIZATION", color = H071.copy(alpha = .7f), fontSize = 8.sp)
@@ -283,6 +298,7 @@ private fun Chip071(text: String, enabled: Boolean, selected: Boolean = false, o
 private fun Camera071(
     modifier: Modifier, profile: TrackingProfile, filter: TargetFilter, zoom: Float,
     exposure: Int, monochrome: Boolean, gain: Float, nightVision: Boolean,
+    motionDetectionEnabled: Boolean,
     onZoomRange: (Float, Float) -> Unit, onPreview: (PreviewView) -> Unit,
     onFrame: (DetectionFrame) -> Unit
 ) {
@@ -298,6 +314,7 @@ private fun Camera071(
     LaunchedEffect(profile) { analyzer.setProfile(profile) }
     LaunchedEffect(filter) { analyzer.setTargetFilter(filter) }
     LaunchedEffect(gain) { analyzer.setDigitalGain(gain) }
+    LaunchedEffect(motionDetectionEnabled) { analyzer.setMotionDetectionEnabled(motionDetectionEnabled) }
 
     LaunchedEffect(camera, zoom) {
         val c = camera ?: return@LaunchedEffect
@@ -464,5 +481,5 @@ private fun fastest071(ts:List<DetectionTarget>)=ts.filter{it.status!=TrackStatu
 private fun nearest071(ts:List<DetectionTarget>)=ts.minByOrNull{hypot(it.normalizedBox.centerX()-.5f,it.normalizedBox.centerY()-.5f)}
 private fun fmtZoom071(z:Float)=if(z<10f)String.format(Locale.US,"%.1fx",z) else String.format(Locale.US,"%.0fx",z)
 private fun point071(x:Float,y:Float,vw:Float,vh:Float,iw:Int,ih:Int):Offset{if(iw<=0||ih<=0)return Offset.Zero;val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;val dh=ih*s;return Offset((vw-dw)/2+x*dw,(vh-dh)/2+y*dh)}
-private fun rect071(b:RectF,vw:Float,vh:Float,iw:Int,ih:Int):RectF{if(iw<=0||ih<=0)return RectF();val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;val dh=ih*s;val ox=(vw-dw)/2;val oy=(vh-dh)/2;return RectF(ox+b.left*dw,oy+b.top*dh,ox+b.right*dw,oy+b.bottom*dh)}
+private fun rect071(b:RectF,vw:Float,vh:Float,iw:Int,ih:Int):RectF{if(iw<=0||ih<=0)return RectF();val s=max(vw/iw.toFloat(),vh/ih.toFloat());val dw=iw*s;valdh=ih*s;val ox=(vw-dw)/2;val oy=(vh-dh)/2;return RectF(ox+b.left*dw,oy+b.top*dh,ox+b.right*dw,oy+b.bottom*dh)}
 private fun crop071(source:Bitmap,target:DetectionTarget,frame:DetectionFrame):Bitmap?{val r=rect071(target.normalizedBox,source.width.toFloat(),source.height.toFloat(),frame.imageWidth,frame.imageHeight);val mx=r.width()*.16f;val my=r.height()*.16f;val l=(r.left-mx).toInt().coerceIn(0,source.width-1);val t=(r.top-my).toInt().coerceIn(0,source.height-1);val rr=(r.right+mx).toInt().coerceIn(l+1,source.width);val bb=(r.bottom+my).toInt().coerceIn(t+1,source.height);return runCatching{Bitmap.createBitmap(source,l,t,rr-l,bb-t)}.getOrNull()}
