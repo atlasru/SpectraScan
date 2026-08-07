@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -74,12 +75,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class ScanMode(val title: String, val tint: Color) {
-    TAC("TACTICAL", Color(0xFF61FFB2)),
-    THM("THERMAL", Color(0xFFFF6A3D)),
-    NVG("NIGHT", Color(0xFF8CFF4F)),
-    SNR("SONAR", Color(0xFF42D9FF))
-}
+private val HudColor = Color(0xFF61FFB2)
+private const val TRAIL_MAX_AGE_MS = 4_500L
+private const val TRAIL_MAX_POINTS = 54
+
+private data class MotionTrailPoint(
+    val x: Float,
+    val y: Float,
+    val at: Long
+)
 
 @Composable
 private fun SpectraScanApp() {
@@ -112,13 +116,14 @@ private fun SpectraScanApp() {
 
 @Composable
 private fun ScannerScreen() {
-    var mode by remember { mutableStateOf(ScanMode.TAC) }
     var profile by remember { mutableStateOf(TrackingProfile.BALANCED) }
     var targetFilter by remember { mutableStateOf(TargetFilter.ALL) }
     var frame by remember { mutableStateOf(DetectionFrame()) }
     var lockedId by remember { mutableStateOf<Int?>(null) }
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
     var zoomBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var trailsEnabled by remember { mutableStateOf(true) }
+    var trails by remember { mutableStateOf<Map<Int, List<MotionTrailPoint>>>(emptyMap()) }
 
     val latestFrame by rememberUpdatedState(frame)
     val lockedTarget = frame.targets.firstOrNull { it.trackingId == lockedId }
@@ -148,19 +153,17 @@ private fun ScannerScreen() {
             profile = profile,
             targetFilter = targetFilter,
             onPreviewReady = { previewView = it },
-            onFrame = { frame = it }
-        )
-
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(mode.tint.copy(alpha = if (mode == ScanMode.THM) 0.16f else 0.055f))
+            onFrame = { nextFrame ->
+                frame = nextFrame
+                trails = updateMotionTrails(trails, nextFrame)
+            }
         )
 
         TrackingHud(
-            color = mode.tint,
+            color = HudColor,
             frame = frame,
             lockedId = lockedId,
+            trails = if (trailsEnabled) trails else emptyMap(),
             onTargetTapped = { tappedId ->
                 lockedId = if (lockedId == tappedId) null else tappedId
             }
@@ -174,8 +177,8 @@ private fun ScannerScreen() {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                "SPECTRASCAN ${BuildConfig.VERSION_NAME} // ${mode.title}",
-                color = mode.tint,
+                "SPECTRASCAN ${BuildConfig.VERSION_NAME} // TRACKING",
+                color = HudColor,
                 fontSize = 15.sp
             )
             Text(
@@ -183,13 +186,13 @@ private fun ScannerScreen() {
                     "${frame.inferenceMs} MS  " +
                     "TARGETS ${frame.targets.size.toString().padStart(2, '0')}  " +
                     "DROP ${frame.rejectedCandidates}",
-                color = mode.tint.copy(alpha = 0.86f),
+                color = HudColor.copy(alpha = 0.86f),
                 fontSize = 10.sp
             )
             Text(
                 "$globalStatus  //  ${profile.title}  //  ${frame.targetFilter.title}" +
                     if (frame.brightTrackerActive) "  //  YOLO+BRT" else "  //  YOLO11",
-                color = statusColor(lockedTarget?.status, mode.tint),
+                color = statusColor(lockedTarget?.status, HudColor),
                 fontSize = 10.sp
             )
         }
@@ -201,7 +204,7 @@ private fun ScannerScreen() {
                     .padding(top = 82.dp, end = 14.dp),
                 bitmap = zoomBitmap,
                 target = lockedTarget,
-                color = mode.tint,
+                color = HudColor,
                 onUnlock = { lockedId = null }
             )
         }
@@ -217,38 +220,56 @@ private fun ScannerScreen() {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 ControlChip(
                     text = "CENTER LOCK",
-                    color = mode.tint,
+                    color = HudColor,
                     enabled = frame.targets.isNotEmpty()
                 ) {
                     lockedId = nearestTargetToCenter(frame.targets)?.trackingId
                 }
                 ControlChip(
+                    text = "MOTION LOCK",
+                    color = HudColor,
+                    enabled = frame.targets.any { targetSpeed(it) > 0.015f }
+                ) {
+                    lockedId = fastestMovingTarget(frame.targets)?.trackingId
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ControlChip(
                     text = "PROFILE ${profile.title}",
-                    color = mode.tint,
+                    color = HudColor,
                     enabled = true
                 ) {
                     profile = profile.next()
                 }
-            }
-
-            ControlChip(
-                text = "FILTER ${targetFilter.title}",
-                color = mode.tint,
-                enabled = true,
-                selected = true
-            ) {
-                lockedId = null
-                targetFilter = targetFilter.next()
+                ControlChip(
+                    text = if (trailsEnabled) "TRAIL ON" else "TRAIL OFF",
+                    color = HudColor,
+                    enabled = true,
+                    selected = trailsEnabled
+                ) {
+                    trailsEnabled = !trailsEnabled
+                    if (!trailsEnabled) trails = emptyMap()
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ScanMode.entries.forEach { item ->
-                    ControlChip(
-                        text = item.name,
-                        color = item.tint,
-                        enabled = true,
-                        selected = item == mode
-                    ) { mode = item }
+                ControlChip(
+                    text = "FILTER ${targetFilter.title}",
+                    color = HudColor,
+                    enabled = true,
+                    selected = true
+                ) {
+                    lockedId = null
+                    trails = emptyMap()
+                    targetFilter = targetFilter.next()
+                }
+                ControlChip(
+                    text = "CLEAR TRAIL",
+                    color = HudColor,
+                    enabled = trails.isNotEmpty()
+                ) {
+                    trails = emptyMap()
                 }
             }
         }
@@ -347,6 +368,7 @@ private fun TrackingHud(
     color: Color,
     frame: DetectionFrame,
     lockedId: Int?,
+    trails: Map<Int, List<MotionTrailPoint>>,
     onTargetTapped: (Int) -> Unit
 ) {
     val labelPaint = remember {
@@ -373,6 +395,7 @@ private fun TrackingHud(
                 }
             }
     ) {
+        drawMotionTrails(color, trails, frame, lockedId)
         drawReticle(color)
         val cx = size.width / 2f
         val cy = size.height / 2f
@@ -403,8 +426,9 @@ private fun TrackingHud(
             drawLine(targetColor, Offset(rect.right, rect.bottom), Offset(rect.right - corner, rect.bottom), 7f)
             drawLine(targetColor, Offset(rect.right, rect.bottom), Offset(rect.right, rect.bottom - corner), 7f)
 
+            val speed = targetSpeed(target)
             val vectorScale = minOf(size.width, size.height) * 0.18f
-            if (hypot(target.velocityX, target.velocityY) > 0.015f) {
+            if (speed > 0.015f) {
                 val motionEnd = Offset(
                     rect.centerX() + target.velocityX * vectorScale,
                     rect.centerY() + target.velocityY * vectorScale
@@ -425,7 +449,8 @@ private fun TrackingHud(
 
             val percent = if (target.confidence > 0f) " ${(target.confidence * 100).toInt()}%" else ""
             val source = if (target.fromBrightnessTracker) "BRT" else "YOLO"
-            val label = "${target.status.name} // $source // ${target.label}$percent // #${target.trackingId}"
+            val motion = if (speed > 0.015f) " // MOV ${String.format(java.util.Locale.US, "%.2f", speed)}" else ""
+            val label = "${target.status.name} // $source // ${target.label}$percent // #${target.trackingId}$motion"
             labelPaint.color = targetColor.toArgb()
             drawContext.canvas.nativeCanvas.drawText(
                 label,
@@ -436,6 +461,30 @@ private fun TrackingHud(
         }
 
         drawRadar(color, frame.targets, lockedId)
+    }
+}
+
+private fun DrawScope.drawMotionTrails(
+    color: Color,
+    trails: Map<Int, List<MotionTrailPoint>>,
+    frame: DetectionFrame,
+    lockedId: Int?
+) {
+    val now = SystemClock.elapsedRealtime()
+    trails.forEach { (id, points) ->
+        if (points.size < 2) return@forEach
+        val trailColor = if (id == lockedId) Color(0xFFFFD64A) else color
+        for (index in 1 until points.size) {
+            val a = points[index - 1]
+            val b = points[index]
+            val age = now - b.at
+            if (age > TRAIL_MAX_AGE_MS) continue
+            val alpha = (1f - age.toFloat() / TRAIL_MAX_AGE_MS.toFloat()).coerceIn(0.08f, 0.85f)
+            val start = mapNormalizedPoint(a.x, a.y, size.width, size.height, frame.imageWidth, frame.imageHeight)
+            val end = mapNormalizedPoint(b.x, b.y, size.width, size.height, frame.imageWidth, frame.imageHeight)
+            drawLine(trailColor.copy(alpha = alpha), start, end, if (id == lockedId) 5f else 3f)
+            if (index % 4 == 0) drawCircle(trailColor.copy(alpha = alpha), 3.5f, end)
+        }
     }
 }
 
@@ -523,6 +572,34 @@ private fun TargetZoomPanel(
     }
 }
 
+private fun updateMotionTrails(
+    current: Map<Int, List<MotionTrailPoint>>,
+    frame: DetectionFrame
+): Map<Int, List<MotionTrailPoint>> {
+    val now = SystemClock.elapsedRealtime()
+    val next = current.mapValues { (_, points) ->
+        points.filter { now - it.at <= TRAIL_MAX_AGE_MS }
+    }.filterValues { it.isNotEmpty() }.toMutableMap()
+
+    frame.targets.forEach { target ->
+        if (target.status == TrackStatus.LOST) return@forEach
+        if (targetSpeed(target) < 0.006f && next[target.trackingId].isNullOrEmpty()) return@forEach
+
+        val point = MotionTrailPoint(
+            x = target.normalizedBox.centerX(),
+            y = target.normalizedBox.centerY(),
+            at = now
+        )
+        val old = next[target.trackingId].orEmpty()
+        val last = old.lastOrNull()
+        val movedEnough = last == null || hypot(point.x - last.x, point.y - last.y) >= 0.0045f
+        if (movedEnough) {
+            next[target.trackingId] = (old + point).takeLast(TRAIL_MAX_POINTS)
+        }
+    }
+    return next
+}
+
 private fun statusColor(status: TrackStatus?, default: Color): Color = when (status) {
     TrackStatus.PREDICTED -> Color(0xFFFFA33C)
     TrackStatus.LOST -> Color(0xFFFF5353)
@@ -531,10 +608,34 @@ private fun statusColor(status: TrackStatus?, default: Color): Color = when (sta
     null -> default
 }
 
+private fun targetSpeed(target: DetectionTarget): Float = hypot(target.velocityX, target.velocityY)
+
+private fun fastestMovingTarget(targets: List<DetectionTarget>): DetectionTarget? =
+    targets.filter { it.status != TrackStatus.LOST }
+        .maxByOrNull(::targetSpeed)
+        ?.takeIf { targetSpeed(it) > 0.015f }
+
 private fun nearestTargetToCenter(targets: List<DetectionTarget>): DetectionTarget? =
     targets.minByOrNull {
         hypot(it.normalizedBox.centerX() - 0.5f, it.normalizedBox.centerY() - 0.5f)
     }
+
+private fun mapNormalizedPoint(
+    x: Float,
+    y: Float,
+    viewWidth: Float,
+    viewHeight: Float,
+    imageWidth: Int,
+    imageHeight: Int
+): Offset {
+    if (imageWidth <= 0 || imageHeight <= 0) return Offset.Zero
+    val scale = max(viewWidth / imageWidth.toFloat(), viewHeight / imageHeight.toFloat())
+    val displayedWidth = imageWidth * scale
+    val displayedHeight = imageHeight * scale
+    val offsetX = (viewWidth - displayedWidth) / 2f
+    val offsetY = (viewHeight - displayedHeight) / 2f
+    return Offset(offsetX + x * displayedWidth, offsetY + y * displayedHeight)
+}
 
 private fun mapTargetRect(
     normalizedBox: RectF,
