@@ -211,7 +211,7 @@ private fun ScannerScreen() {
             )
             Text(
                 "$globalStatus  //  ${profile.title}  //  ${frame.targetFilter.title}" +
-                    if (frame.brightTrackerActive) "  //  YOLO+BRT" else "  //  YOLO11",
+                    if (frame.brightTrackerActive) "  //  YOLO+BRT  // ISP" else "  //  YOLO11  // ISP",
                 color = statusColor(lockedTarget?.status, HudColor),
                 fontSize = 10.sp
             )
@@ -388,14 +388,33 @@ private fun CameraPreview(
                 providerFuture.addListener({
                     val provider = providerFuture.get()
                     cameraProvider = provider
-                    val preview = Preview.Builder().build().also {
+                    val selectedCameraInfo = CameraSelector.DEFAULT_BACK_CAMERA
+                        .filter(provider.availableCameraInfos)
+                        .first()
+
+                    val previewBuilder = Preview.Builder()
+                    CameraEnhancements.configurePreview(
+                        builder = previewBuilder,
+                        cameraInfo = selectedCameraInfo,
+                        sharpen = true,
+                        denoise = true,
+                        stabilization = true
+                    )
+                    val preview = previewBuilder.build().also {
                         it.setSurfaceProvider(surfaceProvider)
                     }
-                    val analysis = ImageAnalysis.Builder()
+
+                    val analysisBuilder = ImageAnalysis.Builder()
                         .setTargetResolution(android.util.Size(640, 480))
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also { it.setAnalyzer(analysisExecutor, analyzer) }
+                    CameraEnhancements.configureAnalysis(
+                        builder = analysisBuilder,
+                        sharpen = true,
+                        denoise = true
+                    )
+                    val analysis = analysisBuilder.build().also {
+                        it.setAnalyzer(analysisExecutor, analyzer)
+                    }
 
                     provider.unbindAll()
                     camera = provider.bindToLifecycle(
