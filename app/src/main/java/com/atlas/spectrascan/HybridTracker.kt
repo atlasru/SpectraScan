@@ -149,7 +149,14 @@ internal class HybridTracker {
 
     private fun buildTargets(now: Long): List<DetectionTarget> = tracks.values.mapNotNull { track ->
         val requiredHits = requiredConfirmationHits(track)
-        if (!track.confirmed && track.consecutiveHits >= requiredHits) {
+        val confirmationCount = if (track.fromMotionTracker || track.fromBrightnessTracker) {
+            track.consecutiveHits
+        } else {
+            // Semantic detections may have cheap flow frames between YOLO rechecks.
+            // Count repeated semantic/flow hits without demanding back-to-back YOLO frames.
+            track.hits
+        }
+        if (!track.confirmed && confirmationCount >= requiredHits) {
             track.confirmed = true
         }
         if (!track.confirmed) return@mapNotNull null
