@@ -25,6 +25,8 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
     @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false;@Volatile private var powerProfile=TrackingProfile.BALANCED
 
     fun setProfile(profile:TrackingProfile){powerProfile=profile;tracker.profile=profile;presentationSmoother.setProfile(profile)}
+    fun setTargetFilter(filter:TrackingFilterAlias){ }
+
     fun setTargetFilter(filter:TargetFilter){
         if(targetFilter!=filter){
             targetFilter=filter;skyWatchEnabled=filter==TargetFilter.SKY;stationaryCamera=skyWatchEnabled;motionDetector.setSkyWatch(skyWatchEnabled,stationaryCamera)
@@ -54,6 +56,9 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
             val useMotion=motionDetectionEnabled||skyWatchEnabled
             val motionResult=if(useMotion)motionDetector.analyze(imageProxy,rotation) else MotionFlowDetector.Result(emptyList(),0f,0f,false)
 
+            // Lightweight trackers run on every analyzer frame that is not occupied by YOLO.
+            // They always follow the most recent semantic anchor, because every YOLO pass
+            // below forcibly reseeds LK + local target motion + template flow.
             val sparseResult=if(zoomBoost) SparseFeatureTracker.Result(emptyList(),false,0f,false) else sparseFlow.track(imageProxy,rotation,now)
             val localResult=if(zoomBoost) LocalTargetMotionTracker.Result(emptyList(),false,false) else localMotion.track(imageProxy,rotation,now)
             val fusedFlow=fuseTargetMeasurements(sparseResult.observations,localResult.observations)
@@ -102,6 +107,7 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
             if(brightObservation!=null&&observations.none{intersectionOverUnion(it.normalizedBox,brightObservation.normalizedBox)>.30f})observations+=brightObservation
             val afterYolo=SystemClock.elapsedRealtime();val targets=tracker.update(observations,afterYolo);lastTargets=targets
             if(!ZoomBoostSignal.isActive(afterYolo)){
+                // Fresh YOLO geometry is the authoritative anchor for every secondary tracker.
                 sparseFlow.seed(imageProxy,rotation,targets,afterYolo)
                 localMotion.seed(imageProxy,rotation,targets,afterYolo)
                 semanticFlow.seed(imageProxy,rotation,targets,afterYolo)
@@ -139,17 +145,23 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
 
     private fun adaptiveYoloInterval(meanLuma:Float,flow:SemanticFlowTracker.Result,targets:List<DetectionTarget>,motionActive:Boolean,zoomBoost:Boolean):Long{
         if(zoomBoost)return 0L
-        if(powerProfile==TrackingProfile.RESPONSIVE){return if(flow.active&&!flow.needsYoloRecheck)300L else 0L}
+        if(powerProfile==TrackingProfile.RESPONSIVE){
+            // Target ~5-6 semantic anchors/sec. If inference itself takes >180 ms,
+            // hardware throughput becomes the limit and the next frame runs ASAP.
+            if(flow.needsYoloRecheck)return 0L
+            return if(meanLuma<24)220L else 180L
+        }
         if(powerProfile==TrackingProfile.SMOOTH){
             if(flow.needsYoloRecheck)return if(meanLuma<35)700L else 420L
             if(skyWatchEnabled){val base=when{motionActive->520L;targets.any{it.label=="UNKNOWN"}->620L;else->1_050L};val low=when{meanLuma<30->1_300L;meanLuma<55->900L;else->0L};return maxOf(base,low)}
             val base=when{targets.isEmpty()->1_000L;targets.any{it.status==TrackStatus.PREDICTED||it.status==TrackStatus.LOST}->520L;flow.active&&flow.averageScore>=.78f->1_150L;else->760L}
             val low=when{meanLuma<25->1_350L;meanLuma<45->950L;meanLuma<65->720L;else->0L};return maxOf(base,low)
         }
-        if(flow.needsYoloRecheck)return if(meanLuma<30)420L else 180L
-        if(skyWatchEnabled){val base=when{motionActive->260L;targets.any{it.label=="UNKNOWN"}->320L;stationaryCamera->700L;else->520L};val low=when{meanLuma<22->850L;meanLuma<38->620L;meanLuma<58->380L;else->0L};return maxOf(base,low)}
-        val interval=when{targets.isEmpty()->if(motionActive)300L else 420L;targets.any{it.status==TrackStatus.PREDICTED||it.status==TrackStatus.LOST}->220L;flow.active&&flow.averageScore>=.82f->650L;flow.active&&flow.averageScore>=.72f->480L;else->300L}
-        val lowFloor=when{meanLuma<22->700L;meanLuma<38->480L;meanLuma<58->300L;else->0L};return maxOf(interval,lowFloor)
+        // BALANCED still uses frequent YOLO anchors so LK/local-motion cannot drift far.
+        if(flow.needsYoloRecheck)return if(meanLuma<30)360L else 170L
+        if(skyWatchEnabled){val base=when{motionActive->240L;targets.any{it.label=="UNKNOWN"}->280L;stationaryCamera->520L;else->420L};val low=when{meanLuma<22->720L;meanLuma<38->500L;meanLuma<58->320L;else->0L};return maxOf(base,low)}
+        val interval=when{targets.isEmpty()->if(motionActive)260L else 340L;targets.any{it.status==TrackStatus.PREDICTED||it.status==TrackStatus.LOST}->180L;flow.active&&flow.averageScore>=.82f->360L;flow.active&&flow.averageScore>=.72f->300L;else->240L}
+        val lowFloor=when{meanLuma<22->580L;meanLuma<38->400L;meanLuma<58->260L;else->0L};return maxOf(interval,lowFloor)
     }
 
     private fun mergeLightweightObservations(flow:List<RawObservation>,motion:List<RawObservation>):List<RawObservation>{if(flow.isEmpty())return motion;if(motion.isEmpty())return flow;val merged=flow.toMutableList();motion.forEach{c->if(merged.none{intersectionOverUnion(it.normalizedBox,c.normalizedBox)>.16f})merged+=c};return merged}
