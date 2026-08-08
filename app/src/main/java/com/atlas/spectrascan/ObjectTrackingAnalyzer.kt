@@ -22,7 +22,7 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
     @Volatile private var targetFilter=TargetFilter.ALL;@Volatile private var digitalGain=1f;@Volatile private var motionDetectionEnabled=false
     @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false;@Volatile private var powerProfile=TrackingProfile.BALANCED
 
-    fun setProfile(profile:TrackingProfile){powerProfile=profile;tracker.profile=profile}
+    fun setProfile(profile:TrackingProfile){powerProfile=profile;tracker.profile=profile;presentationSmoother.setProfile(profile)}
     fun setTargetFilter(filter:TargetFilter){
         if(targetFilter!=filter){
             targetFilter=filter;skyWatchEnabled=filter==TargetFilter.SKY;stationaryCamera=skyWatchEnabled;motionDetector.setSkyWatch(skyWatchEnabled,stationaryCamera)
@@ -52,8 +52,6 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
             val useMotion=motionDetectionEnabled||skyWatchEnabled
             val motionResult=if(useMotion)motionDetector.analyze(imageProxy,rotation) else MotionFlowDetector.Result(emptyList(),0f,0f,false)
 
-            // MINOS-style bridge: sparse pyramidal LK has priority. The older template
-            // tracker remains a fallback when OpenCV has no usable feature points.
             val sparseResult=if(zoomBoost) SparseFeatureTracker.Result(emptyList(),false,0f,false) else sparseFlow.track(imageProxy,rotation,now)
             val flowResult=when{
                 zoomBoost->SemanticFlowTracker.Result(emptyList(),false,0f,false)
@@ -104,11 +102,7 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
 
     private fun adaptiveYoloInterval(meanLuma:Float,flow:SemanticFlowTracker.Result,targets:List<DetectionTarget>,motionActive:Boolean,zoomBoost:Boolean):Long{
         if(zoomBoost)return 0L
-        if(powerProfile==TrackingProfile.RESPONSIVE){
-            // Running YOLO on every available frame blocks the analyzer for ~200 ms and
-            // actually makes visual tracking less smooth. Leave short gaps for LK frames.
-            return if(flow.active&&!flow.needsYoloRecheck)300L else 0L
-        }
+        if(powerProfile==TrackingProfile.RESPONSIVE){return if(flow.active&&!flow.needsYoloRecheck)300L else 0L}
         if(powerProfile==TrackingProfile.SMOOTH){
             if(flow.needsYoloRecheck)return if(meanLuma<35)700L else 420L
             if(skyWatchEnabled){val base=when{motionActive->520L;targets.any{it.label=="UNKNOWN"}->620L;else->1_050L};val low=when{meanLuma<30->1_300L;meanLuma<55->900L;else->0L};return maxOf(base,low)}
@@ -121,13 +115,8 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
         val lowFloor=when{meanLuma<22->700L;meanLuma<38->480L;meanLuma<58->300L;else->0L};return maxOf(interval,lowFloor)
     }
 
-    private fun mergeLightweightObservations(flow:List<RawObservation>,motion:List<RawObservation>):List<RawObservation>{
-        if(flow.isEmpty())return motion;if(motion.isEmpty())return flow
-        val merged=flow.toMutableList();motion.forEach{c->if(merged.none{intersectionOverUnion(it.normalizedBox,c.normalizedBox)>.16f})merged+=c};return merged
-    }
-    private fun dispatchFrame(targets:List<DetectionTarget>,w:Int,h:Int,now:Long,bright:Boolean,motion:Boolean,flow:Boolean,filter:TargetFilter,rejected:Int,luma:Float,low:Boolean,nv:Boolean,throttled:Boolean){
-        lastResultAt=now;val presented=presentationSmoother.apply(targets,now);val frame=DetectionFrame(presented,w,h,lastYoloFps,lastYoloMs,bright,motion,flow,filter,rejected,luma,low,nv,throttled,now);callbackExecutor.execute{onFrame(frame)}
-    }
+    private fun mergeLightweightObservations(flow:List<RawObservation>,motion:List<RawObservation>):List<RawObservation>{if(flow.isEmpty())return motion;if(motion.isEmpty())return flow;val merged=flow.toMutableList();motion.forEach{c->if(merged.none{intersectionOverUnion(it.normalizedBox,c.normalizedBox)>.16f})merged+=c};return merged}
+    private fun dispatchFrame(targets:List<DetectionTarget>,w:Int,h:Int,now:Long,bright:Boolean,motion:Boolean,flow:Boolean,filter:TargetFilter,rejected:Int,luma:Float,low:Boolean,nv:Boolean,throttled:Boolean){lastResultAt=now;val presented=presentationSmoother.apply(targets,now);val frame=DetectionFrame(presented,w,h,lastYoloFps,lastYoloMs,bright,motion,flow,filter,rejected,luma,low,nv,throttled,now);callbackExecutor.execute{onFrame(frame)}}
     private fun rotateBitmap(source:Bitmap,rotation:Int):Bitmap{if(rotation==0)return source;val m=Matrix().apply{postRotate(rotation.toFloat())};return Bitmap.createBitmap(source,0,0,source.width,source.height,m,true)}
     private fun calculateMeanLuma(image:ImageProxy):Float{val p=image.planes.firstOrNull()?:return 255f;val b=p.buffer.duplicate();var sum=0L;var n=0;var y=0;while(y<image.height){var x=0;while(x<image.width){val i=y*p.rowStride+x*p.pixelStride;if(i<b.limit()){sum+=b.get(i).toInt()and 255;n++};x+=8};y+=8};return if(n==0)255f else sum.toFloat()/n}
     private fun findBrightRegion(image:ImageProxy,rotation:Int,mean:Float):RawObservation?{val p=image.planes.firstOrNull()?:return null;val b=p.buffer.duplicate();val width=image.width;val height=image.height;if(mean>110)return null;val threshold=maxOf(182f,mean+72).toInt();var minX=width;var minY=height;var maxX=-1;var maxY=-1;var count=0;var samples=0;var y=0;while(y<height){var x=0;while(x<width){val i=y*p.rowStride+x*p.pixelStride;if(i<b.limit()){samples++;if((b.get(i).toInt()and 255)>=threshold){minX=minOf(minX,x);minY=minOf(minY,y);maxX=maxOf(maxX,x);maxY=maxOf(maxY,y);count++}};x+=4};y+=4};if(samples==0)return null;val ratio=count.toFloat()/samples;if(maxX<=minX||maxY<=minY||ratio !in .0015f.. .10f)return null;val raw=RectF((minX.toFloat()/width-.02f).coerceIn(0f,1f),(minY.toFloat()/height-.02f).coerceIn(0f,1f),(maxX.toFloat()/width+.02f).coerceIn(0f,1f),(maxY.toFloat()/height+.02f).coerceIn(0f,1f));val r=rotateNormalizedRect(raw,rotation);val area=r.width()*r.height();if(r.width() !in .02f.. .55f||r.height() !in .02f.. .55f||area !in .0008f.. .16f)return null;return RawObservation(null,"BRIGHT OBJECT",(.48f+ratio*3.5f).coerceIn(.48f,.90f),r,fromBrightnessTracker=true)}
