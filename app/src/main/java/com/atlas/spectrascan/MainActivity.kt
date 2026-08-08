@@ -1,6 +1,7 @@
 package com.atlas.spectrascan
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ColorMatrix
@@ -32,7 +33,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -64,6 +64,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -73,6 +74,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,13 +83,29 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val HudColor = Color(0xFF84D8A0)
-private val HudDim = Color(0xFF86A78E)
-private val HudAmber = Color(0xFFE6C46A)
-private val HudRed = Color(0xFFE36B63)
+private enum class UiTheme(val title: String) {
+    STANDARD("STANDARD"),
+    FUTURE("FUTURE"),
+    MINOS("MINOS");
+
+    fun next(): UiTheme = entries[(ordinal + 1) % entries.size]
+}
+
+private data class ThemePalette(
+    val primary: Color,
+    val dim: Color,
+    val accent: Color,
+    val danger: Color
+)
+
+private fun palette(theme: UiTheme): ThemePalette = when (theme) {
+    UiTheme.STANDARD -> ThemePalette(Color(0xFF61FFB2), Color(0xFFB8CFC2), Color(0xFFFFD64A), Color(0xFFFF5353))
+    UiTheme.FUTURE -> ThemePalette(Color(0xFF4CFFD6), Color(0xFF74C9D6), Color(0xFFFFC857), Color(0xFFFF5D73))
+    UiTheme.MINOS -> ThemePalette(Color(0xFF28F59A), Color(0xFF6FBF91), Color(0xFFFFC23A), Color(0xFFFF6B3D))
+}
+
 private const val TRAIL_MAX_AGE_MS = 4_500L
 private const val TRAIL_MAX_POINTS = 54
-
 private data class MotionTrailPoint(val x: Float, val y: Float, val at: Long)
 
 @Composable
@@ -102,11 +120,18 @@ private fun SpectraScanApp() {
     if (granted) ScannerScreen() else Box(
         Modifier.fillMaxSize().background(Color.Black),
         contentAlignment = Alignment.Center
-    ) { Text("CAMERA PERMISSION REQUIRED", color = HudColor, fontSize = 11.sp) }
+    ) { Text("CAMERA PERMISSION REQUIRED", color = Color(0xFF61FFB2), fontFamily = FontFamily.Monospace) }
 }
 
 @Composable
 private fun ScannerScreen() {
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("spectrascan_ui", Context.MODE_PRIVATE) }
+    var uiTheme by remember {
+        mutableStateOf(runCatching { UiTheme.valueOf(prefs.getString("theme", UiTheme.STANDARD.name)!!) }.getOrDefault(UiTheme.STANDARD))
+    }
+    val colors = palette(uiTheme)
+
     var profile by remember { mutableStateOf(TrackingProfile.BALANCED) }
     var targetFilter by remember { mutableStateOf(TargetFilter.ALL) }
     var frame by remember { mutableStateOf(DetectionFrame()) }
@@ -138,7 +163,7 @@ private fun ScannerScreen() {
             val target = currentFrame.targets.firstOrNull { it.trackingId == lockedId }
             val source = previewView?.bitmap
             if (target != null && source != null) cropTarget(source, target, currentFrame)?.let { zoomBitmap = it.asImageBitmap() }
-            delay(160)
+            delay(if (uiTheme == UiTheme.MINOS) 110 else 160)
         }
         zoomBitmap = null
     }
@@ -160,31 +185,28 @@ private fun ScannerScreen() {
             }
         )
 
-        TrackingHud(
-            color = HudColor,
+        ThemeHud(
+            theme = uiTheme,
+            colors = colors,
             frame = frame,
             lockedId = lockedId,
             trails = if (trailsEnabled) trails else emptyMap(),
-            showTargetLeader = lockedId != null,
             onTargetTapped = { tappedId -> lockedId = if (lockedId == tappedId) null else tappedId }
         )
 
-        SensorStatusPanel(
-            modifier = Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 10.dp),
-            frame = frame,
-            profile = profile,
-            globalStatus = globalStatus,
-            cameraZoom = cameraZoom,
-            lockedTarget = lockedTarget,
-            nightVisionActive = nightVisionActive
-        )
+        when (uiTheme) {
+            UiTheme.STANDARD -> StandardStatus(frame, profile, globalStatus, colors)
+            UiTheme.FUTURE -> FutureStatus(frame, profile, globalStatus, colors)
+            UiTheme.MINOS -> MinosStatus(frame, profile, globalStatus, cameraZoom, lockedTarget, colors)
+        }
 
         if (lockedId != null) {
-            TargetZoomPanel(
-                modifier = Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 10.dp),
+            TargetPanel(
+                theme = uiTheme,
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = if (uiTheme == UiTheme.STANDARD) 90.dp else 10.dp, end = 10.dp),
                 bitmap = zoomBitmap,
                 target = lockedTarget,
-                color = HudColor,
+                colors = colors,
                 onUnlock = { lockedId = null }
             )
         }
@@ -192,12 +214,18 @@ private fun ScannerScreen() {
         if (settingsOpen) {
             SettingsPanel(
                 modifier = Modifier.align(Alignment.CenterEnd).padding(end = 10.dp),
+                theme = uiTheme,
+                colors = colors,
                 profile = profile,
                 exposureIndex = exposureIndex,
                 digitalGain = digitalGain,
                 monochrome = monochrome,
                 autoNightVision = autoNightVision,
                 trailsEnabled = trailsEnabled,
+                onTheme = {
+                    uiTheme = uiTheme.next()
+                    prefs.edit().putString("theme", uiTheme.name).apply()
+                },
                 onProfile = { profile = profile.next() },
                 onExposure = { exposureIndex = if (exposureIndex >= 3) -3 else exposureIndex + 1 },
                 onGain = {
@@ -219,7 +247,9 @@ private fun ScannerScreen() {
             )
         }
 
-        LegacyBottomBar(
+        BottomBar(
+            theme = uiTheme,
+            colors = colors,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
             canLock = frame.targets.isNotEmpty(),
             canMotionLock = frame.targets.any { targetSpeed(it) > 0.015f },
@@ -246,48 +276,62 @@ private fun ScannerScreen() {
 }
 
 @Composable
-private fun SensorStatusPanel(
-    modifier: Modifier,
+private fun StandardStatus(frame: DetectionFrame, profile: TrackingProfile, globalStatus: String, colors: ThemePalette) {
+    Column(
+        Modifier.fillMaxWidth().padding(top = 14.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        MonoText("SPECTRASCAN ${BuildConfig.VERSION_NAME}", colors.primary, 15)
+        MonoText("YOLO ${frame.inferenceFps.toString().padStart(2, '0')} FPS  ${frame.inferenceMs} MS  TGT ${frame.targets.size.toString().padStart(2, '0')}", colors.primary.copy(alpha = 0.82f), 10)
+        MonoText("$globalStatus // ${frame.targetFilter.title} // ${profile.title} // LUMA ${frame.meanLuma.toInt()}", statusColor(frame.targets.firstOrNull()?.status, colors), 10)
+    }
+}
+
+@Composable
+private fun FutureStatus(frame: DetectionFrame, profile: TrackingProfile, globalStatus: String, colors: ThemePalette) {
+    Column(
+        Modifier.alignTopCenterBox().background(Color.Black.copy(alpha = 0.35f)).border(1.dp, colors.primary.copy(alpha = 0.35f)).padding(horizontal = 14.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        MonoText("// SPECTRASCAN ${BuildConfig.VERSION_NAME} //", colors.primary, 13)
+        MonoText("SYS $globalStatus | AI ${frame.inferenceFps}FPS | ${frame.inferenceMs}MS | ${profile.title}", colors.dim, 8)
+    }
+}
+
+private fun Modifier.alignTopCenterBox(): Modifier = this.fillMaxWidth().padding(top = 12.dp, start = 92.dp, end = 92.dp)
+
+@Composable
+private fun MinosStatus(
     frame: DetectionFrame,
     profile: TrackingProfile,
     globalStatus: String,
     cameraZoom: Float,
     lockedTarget: DetectionTarget?,
-    nightVisionActive: Boolean
+    colors: ThemePalette
 ) {
-    val statusColor = if (frame.lowLight) HudAmber else HudColor
     Column(
-        modifier = modifier
-            .width(205.dp)
-            .background(Color.Black.copy(alpha = 0.72f))
-            .border(1.dp, HudDim.copy(alpha = 0.72f))
-            .padding(7.dp),
-        verticalArrangement = Arrangement.spacedBy(1.dp)
+        Modifier.width(246.dp).padding(start = 7.dp, top = 8.dp).background(Color.Black.copy(alpha = 0.46f)).border(1.dp, colors.primary.copy(alpha = 0.50f)).padding(5.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        LegacyText("SPECTRASCAN // SENSOR SUITE", HudColor, 10)
-        LegacyText("BUILD ${BuildConfig.VERSION_NAME}", HudDim, 8)
-        Spacer(Modifier.height(3.dp))
-        LegacyText("STATUS   $globalStatus", statusColor, 9)
-        LegacyText("DETECT   YOLO11", HudDim, 8)
-        LegacyText("RATE     ${frame.inferenceFps.toString().padStart(2, '0')} FPS", HudDim, 8)
-        LegacyText("LATENCY  ${frame.inferenceMs.toString().padStart(3, ' ')} MS", HudDim, 8)
-        LegacyText("TARGETS  ${frame.targets.size.toString().padStart(2, '0')}", HudDim, 8)
-        LegacyText("LUMA     ${frame.meanLuma.toInt().toString().padStart(3, ' ')}", HudDim, 8)
-        LegacyText("ZOOM     ${formatZoom(cameraZoom)}", HudDim, 8)
-        LegacyText("PROFILE  ${profile.title}", HudDim, 8)
-        LegacyText("FILTER   ${frame.targetFilter.title}", HudDim, 8)
-        LegacyText("LOCK     ${lockedTarget?.trackingId?.toString()?.padStart(2, '0') ?: "--"}", if (lockedTarget != null) HudAmber else HudDim, 8)
-        if (frame.lowLight) LegacyText(if (nightVisionActive) "LOW LIGHT // AUTO NV" else "LOW LIGHT", HudAmber, 8)
+        MonoText("SPECTRASCAN // EXPERIMENTAL SENSOR SUITE", colors.primary, 8)
+        MonoText("SCAN MODE: ${frame.targetFilter.title}    RENDER: LIVE RGB", colors.primary, 7)
+        MonoText("CAM ZOOM: ${formatZoom(cameraZoom)}    LOCK: ${lockedTarget?.trackingId ?: "--"}", colors.dim, 7)
+        MonoText("AI: YOLO11    RATE:${frame.inferenceFps}FPS    LAT:${frame.inferenceMs}MS", colors.dim, 7)
+        MonoText("STATUS:$globalStatus    PROFILE:${profile.title}", colors.dim, 7)
+        MonoText("TARGETS:${frame.targets.size}    LUMA:${frame.meanLuma.toInt()}    ISP:ON", colors.dim, 7)
+        MonoText("HEAT:OFF    LOGS:0    AUTOLOCK:OFF", colors.dim, 7)
     }
 }
 
 @Composable
-private fun LegacyText(text: String, color: Color, size: Int) {
-    Text(text = text, color = color, fontSize = size.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+private fun MonoText(text: String, color: Color, size: Int) {
+    Text(text, color = color, fontSize = size.sp, fontFamily = FontFamily.Monospace)
 }
 
 @Composable
-private fun LegacyBottomBar(
+private fun BottomBar(
+    theme: UiTheme,
+    colors: ThemePalette,
     modifier: Modifier,
     canLock: Boolean,
     canMotionLock: Boolean,
@@ -300,45 +344,45 @@ private fun LegacyBottomBar(
     onZoom: () -> Unit,
     onSettings: () -> Unit
 ) {
+    val panelAlpha = if (theme == UiTheme.FUTURE) 0.55f else 0.78f
     Row(
-        modifier = modifier
-            .background(Color.Black.copy(alpha = 0.78f))
-            .border(1.dp, HudDim.copy(alpha = 0.75f)),
-        horizontalArrangement = Arrangement.spacedBy(0.dp)
+        modifier.background(Color.Black.copy(alpha = panelAlpha)).border(1.dp, colors.dim.copy(alpha = 0.62f)),
+        horizontalArrangement = Arrangement.spacedBy(if (theme == UiTheme.FUTURE) 4.dp else 0.dp)
     ) {
-        LegacyButton("LOCK", canLock, false, onLock)
-        LegacyButton("M-LOCK", canMotionLock, false, onMotionLock)
-        LegacyButton("F:${filter.title}", true, true, onFilter)
-        LegacyButton(formatZoom(cameraZoom).uppercase(Locale.US), true, cameraZoom > 1.01f, onZoom)
-        LegacyButton("SET", true, settingsOpen, onSettings)
+        ThemedButton("LOCK", canLock, false, theme, colors, onLock)
+        ThemedButton(if (theme == UiTheme.MINOS) "MOTION" else "M-LOCK", canMotionLock, false, theme, colors, onMotionLock)
+        ThemedButton("F:${filter.title}", true, true, theme, colors, onFilter)
+        ThemedButton(formatZoom(cameraZoom).uppercase(Locale.US), true, cameraZoom > 1.01f, theme, colors, onZoom)
+        ThemedButton(if (theme == UiTheme.MINOS) "MENU" else "SET", true, settingsOpen, theme, colors, onSettings)
     }
 }
 
 @Composable
-private fun LegacyButton(text: String, enabled: Boolean, selected: Boolean, onClick: () -> Unit) {
+private fun ThemedButton(text: String, enabled: Boolean, selected: Boolean, theme: UiTheme, colors: ThemePalette, onClick: () -> Unit) {
     val c = when {
-        !enabled -> Color.Gray.copy(alpha = 0.5f)
-        selected -> HudColor
+        !enabled -> Color.Gray.copy(alpha = 0.48f)
+        selected -> colors.primary
         else -> Color.White.copy(alpha = 0.76f)
     }
+    val bg = if (theme == UiTheme.FUTURE) colors.primary.copy(alpha = if (selected) 0.12f else 0.03f) else Color.Transparent
     Box(
-        modifier = Modifier
-            .border(0.5.dp, HudDim.copy(alpha = 0.55f))
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 8.dp),
+        Modifier.background(bg).border(if (theme == UiTheme.FUTURE) 1.dp else 0.5.dp, colors.dim.copy(alpha = 0.5f)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 11.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center
-    ) { LegacyText(text, c, 8) }
+    ) { MonoText(text, c, if (theme == UiTheme.MINOS) 7 else 8) }
 }
 
 @Composable
 private fun SettingsPanel(
     modifier: Modifier,
+    theme: UiTheme,
+    colors: ThemePalette,
     profile: TrackingProfile,
     exposureIndex: Int,
     digitalGain: Float,
     monochrome: Boolean,
     autoNightVision: Boolean,
     trailsEnabled: Boolean,
+    onTheme: () -> Unit,
     onProfile: () -> Unit,
     onExposure: () -> Unit,
     onGain: () -> Unit,
@@ -349,33 +393,61 @@ private fun SettingsPanel(
     onClose: () -> Unit
 ) {
     Column(
-        modifier = modifier
-            .width(180.dp)
-            .background(Color.Black.copy(alpha = 0.86f))
-            .border(1.dp, HudDim.copy(alpha = 0.78f))
-            .padding(7.dp),
+        modifier.width(190.dp).background(Color.Black.copy(alpha = 0.90f)).border(1.dp, colors.dim.copy(alpha = 0.75f)).padding(7.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        LegacyText("SYSTEM // CONTROL", HudColor, 9)
-        LegacySetting("PERF", profile.title, onProfile)
-        LegacySetting("EV", if (exposureIndex >= 0) "+$exposureIndex" else "$exposureIndex", onExposure)
-        LegacySetting("GAIN", String.format(Locale.US, "%.1fx", digitalGain), onGain)
-        LegacySetting("B/W", if (monochrome) "ON" else "OFF", onMonochrome)
-        LegacySetting("AUTO NV", if (autoNightVision) "ON" else "OFF", onAutoNv)
-        LegacySetting("TRAIL", if (trailsEnabled) "ON" else "OFF", onTrails)
-        LegacySetting("TRAIL MEM", "CLEAR", onClearTrails)
-        LegacySetting("PANEL", "CLOSE", onClose)
+        MonoText(if (theme == UiTheme.MINOS) "SYSTEM // CONTROL" else "SETTINGS", colors.primary, 9)
+        SettingRow("THEME", theme.title, colors, onTheme)
+        SettingRow("PERF", profile.title, colors, onProfile)
+        SettingRow("EV", if (exposureIndex >= 0) "+$exposureIndex" else "$exposureIndex", colors, onExposure)
+        SettingRow("GAIN", String.format(Locale.US, "%.1fx", digitalGain), colors, onGain)
+        SettingRow("B/W", if (monochrome) "ON" else "OFF", colors, onMonochrome)
+        SettingRow("AUTO NV", if (autoNightVision) "ON" else "OFF", colors, onAutoNv)
+        SettingRow("TRAIL", if (trailsEnabled) "ON" else "OFF", colors, onTrails)
+        SettingRow("TRAIL MEM", "CLEAR", colors, onClearTrails)
+        SettingRow("PANEL", "CLOSE", colors, onClose)
     }
 }
 
 @Composable
-private fun LegacySetting(name: String, value: String, onClick: () -> Unit) {
+private fun SettingRow(name: String, value: String, colors: ThemePalette, onClick: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().border(0.5.dp, HudDim.copy(alpha = 0.45f)).clickable(onClick = onClick).padding(6.dp),
+        Modifier.fillMaxWidth().border(0.5.dp, colors.dim.copy(alpha = 0.45f)).clickable(onClick = onClick).padding(6.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        LegacyText(name, HudDim, 8)
-        LegacyText(value, HudColor, 8)
+        MonoText(name, colors.dim, 8)
+        MonoText(value, colors.primary, 8)
+    }
+}
+
+@Composable
+private fun TargetPanel(theme: UiTheme, modifier: Modifier, bitmap: ImageBitmap?, target: DetectionTarget?, colors: ThemePalette, onUnlock: () -> Unit) {
+    val line = statusColor(target?.status, colors)
+    val width = when (theme) { UiTheme.MINOS -> 205.dp; UiTheme.FUTURE -> 176.dp; UiTheme.STANDARD -> 185.dp }
+    val imageHeight = when (theme) { UiTheme.MINOS -> 128.dp; UiTheme.FUTURE -> 108.dp; UiTheme.STANDARD -> 118.dp }
+    Column(modifier.width(width).background(Color.Black.copy(alpha = 0.82f)).border(1.dp, line).clickable { onUnlock() }.padding(5.dp)) {
+        MonoText(when (theme) {
+            UiTheme.MINOS -> "LIVE RGB CROP // TARGET"
+            UiTheme.FUTURE -> "TARGET INSPECTOR"
+            UiTheme.STANDARD -> "TARGET VIEW"
+        }, line, 8)
+        Spacer(Modifier.height(4.dp))
+        Box(Modifier.fillMaxWidth().height(imageHeight).background(Color.Black).border(0.5.dp, colors.dim.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
+            if (bitmap != null) Image(bitmap, "Locked target", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            else MonoText("NO SIGNAL", colors.danger, 9)
+        }
+        Spacer(Modifier.height(3.dp))
+        when (theme) {
+            UiTheme.MINOS -> {
+                MonoText("X/Y TRACK // ID:${target?.trackingId ?: "--"}", colors.dim, 7)
+                MonoText("${target?.label ?: "UNKNOWN"} ${(target?.confidence?.times(100))?.toInt() ?: 0}% // ${target?.status?.name ?: "LOST"}", line, 7)
+            }
+            UiTheme.FUTURE -> {
+                MonoText("ID ${target?.trackingId ?: "--"} // ${target?.label ?: "UNKNOWN"}", line, 8)
+                MonoText("CONF ${(target?.confidence?.times(100))?.toInt() ?: 0}% // ${target?.status?.name ?: "LOST"}", colors.dim, 7)
+            }
+            UiTheme.STANDARD -> MonoText("${target?.label ?: "UNKNOWN"} #${target?.trackingId ?: "--"} // ${target?.status?.name ?: "LOST"}", line, 8)
+        }
     }
 }
 
@@ -437,9 +509,7 @@ private fun CameraPreview(
                     val previewBuilder = Preview.Builder()
                     CameraEnhancements.configurePreview(previewBuilder, selectedCameraInfo, sharpen = true, denoise = true, stabilization = true)
                     val preview = previewBuilder.build().also { it.setSurfaceProvider(surfaceProvider) }
-                    val analysisBuilder = ImageAnalysis.Builder()
-                        .setTargetResolution(android.util.Size(640, 480))
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    val analysisBuilder = ImageAnalysis.Builder().setTargetResolution(android.util.Size(640, 480)).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     CameraEnhancements.configureAnalysis(analysisBuilder, sharpen = true, denoise = true)
                     val analysis = analysisBuilder.build().also { it.setAnalyzer(analysisExecutor, analyzer) }
                     provider.unbindAll()
@@ -493,207 +563,208 @@ private fun applyPreviewFilter(preview: PreviewView, monochrome: Boolean, gain: 
 }
 
 @Composable
-private fun TrackingHud(
-    color: Color,
+private fun ThemeHud(
+    theme: UiTheme,
+    colors: ThemePalette,
     frame: DetectionFrame,
     lockedId: Int?,
     trails: Map<Int, List<MotionTrailPoint>>,
-    showTargetLeader: Boolean,
     onTargetTapped: (Int) -> Unit
 ) {
-    val labelPaint = remember {
+    val labelPaint = remember(theme) {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
-            textSize = 20f
+            typeface = Typeface.create(Typeface.MONOSPACE, if (theme == UiTheme.FUTURE) Typeface.BOLD else Typeface.NORMAL)
+            textSize = if (theme == UiTheme.MINOS) 18f else 20f
         }
     }
 
-    Canvas(
-        Modifier.fillMaxSize().pointerInput(frame.targets, frame.imageWidth, frame.imageHeight, lockedId) {
-            detectTapGestures { tap ->
-                frame.targets.asReversed().firstOrNull {
-                    mapTargetRect(it.normalizedBox, size.width.toFloat(), size.height.toFloat(), frame.imageWidth, frame.imageHeight).contains(tap.x, tap.y)
-                }?.let { onTargetTapped(it.trackingId) }
-            }
+    Canvas(Modifier.fillMaxSize().pointerInput(frame.targets, frame.imageWidth, frame.imageHeight, lockedId, theme) {
+        detectTapGestures { tap ->
+            frame.targets.asReversed().firstOrNull {
+                mapTargetRect(it.normalizedBox, size.width.toFloat(), size.height.toFloat(), frame.imageWidth, frame.imageHeight).contains(tap.x, tap.y)
+            }?.let { onTargetTapped(it.trackingId) }
         }
-    ) {
-        drawMotionTrails(color, trails, frame, lockedId)
-        drawLegacyReticle(color)
+    }) {
+        drawTrails(theme, colors, trails, frame, lockedId)
+        when (theme) {
+            UiTheme.STANDARD -> drawStandardReticle(colors)
+            UiTheme.FUTURE -> drawFutureReticle(colors)
+            UiTheme.MINOS -> drawMinosReticle(colors)
+        }
 
         frame.targets.forEach { target ->
             val rect = mapTargetRect(target.normalizedBox, size.width, size.height, frame.imageWidth, frame.imageHeight)
-            val isLocked = target.trackingId == lockedId
-            val targetColor = if (isLocked) HudAmber else statusColor(target.status, color)
+            val locked = target.trackingId == lockedId
+            val targetColor = if (locked) colors.accent else statusColor(target.status, colors)
             val dashed = target.status == TrackStatus.PREDICTED || target.status == TrackStatus.LOST
-            val pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(12f, 8f)) else null
+            val dash = if (dashed) PathEffect.dashPathEffect(floatArrayOf(12f, 8f)) else null
 
-            drawRect(
-                color = targetColor.copy(alpha = if (isLocked) 0.96f else 0.80f),
-                topLeft = Offset(rect.left, rect.top),
-                size = Size(rect.width(), rect.height()),
-                style = Stroke(if (isLocked) 2.2f else 1.4f, pathEffect = pathEffect)
-            )
-
-            if (isLocked) {
-                val tick = 8f
-                drawLine(targetColor, Offset(rect.left - tick, rect.top), Offset(rect.left, rect.top), 2f)
-                drawLine(targetColor, Offset(rect.right, rect.bottom), Offset(rect.right + tick, rect.bottom), 2f)
-                drawCircle(targetColor, 3f, Offset(rect.centerX(), rect.centerY()))
-                if (showTargetLeader) {
-                    val panelAnchor = Offset(size.width - 202f, 82f)
-                    val start = Offset(rect.right, rect.top + rect.height() * 0.28f)
-                    val elbow = Offset((start.x + panelAnchor.x) * 0.55f, start.y)
-                    drawLine(targetColor.copy(alpha = 0.70f), start, elbow, 1.3f)
-                    drawLine(targetColor.copy(alpha = 0.70f), elbow, panelAnchor, 1.3f)
-                    drawCircle(targetColor.copy(alpha = 0.85f), 2.5f, panelAnchor)
-                }
+            when (theme) {
+                UiTheme.STANDARD -> drawRect(targetColor, Offset(rect.left, rect.top), Size(rect.width(), rect.height()), style = Stroke(if (locked) 2.5f else 1.5f, pathEffect = dash))
+                UiTheme.FUTURE -> drawFutureBox(rect, targetColor, locked, dashed)
+                UiTheme.MINOS -> drawRect(targetColor, Offset(rect.left, rect.top), Size(rect.width(), rect.height()), style = Stroke(if (locked) 2f else 1.2f, pathEffect = dash))
             }
 
-            val percent = if (target.confidence > 0f) " ${(target.confidence * 100).toInt()}%" else ""
-            val label = "${target.label}$percent  ID:${target.trackingId.toString().padStart(2, '0')}  ${target.status.name}"
+            if (locked) drawLeader(theme, targetColor, rect)
+
+            val conf = if (target.confidence > 0f) " ${(target.confidence * 100).toInt()}%" else ""
+            val label = when (theme) {
+                UiTheme.STANDARD -> "${target.label}$conf // #${target.trackingId}"
+                UiTheme.FUTURE -> "${target.status.name} // ${target.label}$conf // ID ${target.trackingId}"
+                UiTheme.MINOS -> "YOLO // ${target.label}$conf // #${target.trackingId}"
+            }
             labelPaint.color = targetColor.toArgb()
             drawContext.canvas.nativeCanvas.drawText(label, rect.left, (rect.top - 6f).coerceAtLeast(24f), labelPaint)
         }
 
-        drawRadar(color, frame.targets, lockedId)
+        drawRadar(theme, colors, frame.targets, lockedId)
     }
 }
 
-private fun DrawScope.drawLegacyReticle(color: Color) {
-    val cx = size.width / 2f
-    val cy = size.height / 2f
-    val dim = color.copy(alpha = 0.48f)
-    drawLine(dim, Offset(cx - 34f, cy), Offset(cx - 8f, cy), 1f)
-    drawLine(dim, Offset(cx + 8f, cy), Offset(cx + 34f, cy), 1f)
-    drawLine(dim, Offset(cx, cy - 34f), Offset(cx, cy - 8f), 1f)
-    drawLine(dim, Offset(cx, cy + 8f), Offset(cx, cy + 34f), 1f)
-    drawCircle(dim, 2f, Offset(cx, cy))
-
-    val pad = 18f
-    val len = 34f
-    drawLine(dim, Offset(pad, pad), Offset(pad + len, pad), 1f)
-    drawLine(dim, Offset(pad, pad), Offset(pad, pad + len), 1f)
-    drawLine(dim, Offset(size.width - pad, pad), Offset(size.width - pad - len, pad), 1f)
-    drawLine(dim, Offset(size.width - pad, pad), Offset(size.width - pad, pad + len), 1f)
-    drawLine(dim, Offset(pad, size.height - pad), Offset(pad + len, size.height - pad), 1f)
-    drawLine(dim, Offset(pad, size.height - pad), Offset(pad, size.height - pad - len), 1f)
-    drawLine(dim, Offset(size.width - pad, size.height - pad), Offset(size.width - pad - len, size.height - pad), 1f)
-    drawLine(dim, Offset(size.width - pad, size.height - pad), Offset(size.width - pad, size.height - pad - len), 1f)
+private fun DrawScope.drawFutureBox(rect: RectF, c: Color, locked: Boolean, dashed: Boolean) {
+    if (dashed) {
+        drawRect(c, Offset(rect.left, rect.top), Size(rect.width(), rect.height()), style = Stroke(1.4f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 7f))))
+        return
+    }
+    val len = max(14f, min(rect.width(), rect.height()) * 0.23f)
+    val w = if (locked) 3f else 2f
+    drawLine(c, Offset(rect.left, rect.top), Offset(rect.left + len, rect.top), w)
+    drawLine(c, Offset(rect.left, rect.top), Offset(rect.left, rect.top + len), w)
+    drawLine(c, Offset(rect.right, rect.top), Offset(rect.right - len, rect.top), w)
+    drawLine(c, Offset(rect.right, rect.top), Offset(rect.right, rect.top + len), w)
+    drawLine(c, Offset(rect.left, rect.bottom), Offset(rect.left + len, rect.bottom), w)
+    drawLine(c, Offset(rect.left, rect.bottom), Offset(rect.left, rect.bottom - len), w)
+    drawLine(c, Offset(rect.right, rect.bottom), Offset(rect.right - len, rect.bottom), w)
+    drawLine(c, Offset(rect.right, rect.bottom), Offset(rect.right, rect.bottom - len), w)
+    if (locked) drawCircle(c.copy(alpha = 0.65f), 9f, Offset(rect.centerX(), rect.centerY()), style = Stroke(1.5f))
 }
 
-private fun DrawScope.drawMotionTrails(color: Color, trails: Map<Int, List<MotionTrailPoint>>, frame: DetectionFrame, lockedId: Int?) {
+private fun DrawScope.drawLeader(theme: UiTheme, c: Color, rect: RectF) {
+    val anchor = when (theme) {
+        UiTheme.STANDARD -> Offset(size.width - 205f, 125f)
+        UiTheme.FUTURE -> Offset(size.width - 192f, 70f)
+        UiTheme.MINOS -> Offset(size.width - 220f, 82f)
+    }
+    val start = Offset(rect.right, rect.top + rect.height() * 0.30f)
+    val elbow = Offset((start.x + anchor.x) * 0.55f, start.y)
+    drawLine(c.copy(alpha = 0.72f), start, elbow, 1.2f)
+    drawLine(c.copy(alpha = 0.72f), elbow, anchor, 1.2f)
+    if (theme == UiTheme.MINOS) {
+        drawCircle(c.copy(alpha = 0.8f), 4f, start, style = Stroke(1f))
+        drawCircle(c.copy(alpha = 0.8f), 3f, anchor, style = Stroke(1f))
+    }
+}
+
+private fun DrawScope.drawStandardReticle(colors: ThemePalette) {
+    val cx = size.width / 2f; val cy = size.height / 2f; val c = colors.primary.copy(alpha = 0.45f)
+    drawLine(c, Offset(cx - 34f, cy), Offset(cx - 8f, cy), 1f)
+    drawLine(c, Offset(cx + 8f, cy), Offset(cx + 34f, cy), 1f)
+    drawLine(c, Offset(cx, cy - 34f), Offset(cx, cy - 8f), 1f)
+    drawLine(c, Offset(cx, cy + 8f), Offset(cx, cy + 34f), 1f)
+    drawCircle(c, 2f, Offset(cx, cy))
+}
+
+private fun DrawScope.drawFutureReticle(colors: ThemePalette) {
+    val cx = size.width / 2f; val cy = size.height / 2f; val c = colors.primary.copy(alpha = 0.62f)
+    drawCircle(c, 54f, Offset(cx, cy), style = Stroke(1.3f))
+    drawCircle(c.copy(alpha = 0.7f), 7f, Offset(cx, cy), style = Stroke(1.2f))
+    drawLine(c, Offset(cx - 88f, cy), Offset(cx - 16f, cy), 1.2f)
+    drawLine(c, Offset(cx + 16f, cy), Offset(cx + 88f, cy), 1.2f)
+    drawLine(c, Offset(cx, cy - 88f), Offset(cx, cy - 16f), 1.2f)
+    drawLine(c, Offset(cx, cy + 16f), Offset(cx, cy + 88f), 1.2f)
+    val pad = 22f; val len = 48f
+    drawLine(c, Offset(pad, pad), Offset(pad + len, pad), 2f); drawLine(c, Offset(pad, pad), Offset(pad, pad + len), 2f)
+    drawLine(c, Offset(size.width-pad,pad), Offset(size.width-pad-len,pad), 2f); drawLine(c, Offset(size.width-pad,pad), Offset(size.width-pad,pad+len), 2f)
+}
+
+private fun DrawScope.drawMinosReticle(colors: ThemePalette) {
+    val cx = size.width / 2f; val cy = size.height / 2f; val c = colors.primary.copy(alpha = 0.52f)
+    drawCircle(c, 112f, Offset(cx, cy), style = Stroke(1f))
+    drawCircle(c, 10f, Offset(cx, cy), style = Stroke(1f))
+    drawLine(c, Offset(cx - 138f, cy), Offset(cx - 16f, cy), 1f)
+    drawLine(c, Offset(cx + 16f, cy), Offset(cx + 138f, cy), 1f)
+    drawLine(c, Offset(cx, cy - 138f), Offset(cx, cy - 16f), 1f)
+    drawLine(c, Offset(cx, cy + 16f), Offset(cx, cy + 138f), 1f)
+    for (r in listOf(42f, 76f)) drawCircle(c.copy(alpha = 0.22f), r, Offset(cx, cy), style = Stroke(1f))
+}
+
+private fun DrawScope.drawTrails(theme: UiTheme, colors: ThemePalette, trails: Map<Int, List<MotionTrailPoint>>, frame: DetectionFrame, lockedId: Int?) {
     val now = SystemClock.elapsedRealtime()
     trails.forEach { (id, points) ->
         if (points.size < 2) return@forEach
-        val trailColor = if (id == lockedId) HudAmber else color
-        for (index in 1 until points.size) {
-            val a = points[index - 1]
-            val b = points[index]
-            val age = now - b.at
+        val tc = if (id == lockedId) colors.accent else colors.primary
+        for (i in 1 until points.size) {
+            val a = points[i-1]; val b = points[i]; val age = now - b.at
             if (age > TRAIL_MAX_AGE_MS) continue
-            val alpha = (1f - age.toFloat() / TRAIL_MAX_AGE_MS).coerceIn(0.04f, 0.42f)
-            val start = mapNormalizedPoint(a.x, a.y, size.width, size.height, frame.imageWidth, frame.imageHeight)
-            val end = mapNormalizedPoint(b.x, b.y, size.width, size.height, frame.imageWidth, frame.imageHeight)
-            drawLine(trailColor.copy(alpha = alpha), start, end, if (id == lockedId) 1.5f else 1f)
+            val alpha = (1f - age.toFloat()/TRAIL_MAX_AGE_MS).coerceIn(0.04f, if (theme == UiTheme.FUTURE) 0.62f else 0.38f)
+            val s = mapNormalizedPoint(a.x,a.y,size.width,size.height,frame.imageWidth,frame.imageHeight)
+            val e = mapNormalizedPoint(b.x,b.y,size.width,size.height,frame.imageWidth,frame.imageHeight)
+            drawLine(tc.copy(alpha=alpha),s,e,if(theme==UiTheme.FUTURE)2f else 1f)
+            if(theme==UiTheme.MINOS && i%5==0) drawCircle(tc.copy(alpha=alpha),2f,e)
         }
     }
 }
 
-private fun DrawScope.drawRadar(color: Color, targets: List<DetectionTarget>, lockedId: Int?) {
-    val radius = 48f
-    val center = Offset(size.width - 66f, size.height - 100f)
-    drawRect(Color.Black.copy(alpha = 0.55f), Offset(center.x - 58f, center.y - 58f), Size(116f, 116f))
-    drawCircle(color.copy(alpha = 0.55f), radius, center, style = Stroke(1f))
-    drawCircle(color.copy(alpha = 0.28f), radius / 2f, center, style = Stroke(1f))
-    drawLine(color.copy(alpha = 0.28f), Offset(center.x - radius, center.y), Offset(center.x + radius, center.y), 1f)
-    drawLine(color.copy(alpha = 0.28f), Offset(center.x, center.y - radius), Offset(center.x, center.y + radius), 1f)
-    targets.forEach { target ->
-        val x = center.x + (target.normalizedBox.centerX() - 0.5f) * radius * 1.65f
-        val y = center.y + (target.normalizedBox.centerY() - 0.5f) * radius * 1.65f
-        val dotColor = if (target.trackingId == lockedId) HudAmber else statusColor(target.status, color)
-        drawCircle(dotColor, if (target.trackingId == lockedId) 4f else 2.5f, Offset(x, y))
+private fun DrawScope.drawRadar(theme: UiTheme, colors: ThemePalette, targets: List<DetectionTarget>, lockedId: Int?) {
+    val radius = when(theme){UiTheme.STANDARD->44f;UiTheme.FUTURE->64f;UiTheme.MINOS->52f}
+    val center = Offset(size.width-(radius+20f), size.height-(if(theme==UiTheme.MINOS)110f else 100f))
+    drawCircle(Color.Black.copy(alpha=0.48f),radius+8f,center)
+    drawCircle(colors.primary.copy(alpha=0.62f),radius,center,style=Stroke(1.2f))
+    drawCircle(colors.primary.copy(alpha=0.24f),radius/2f,center,style=Stroke(1f))
+    drawLine(colors.primary.copy(alpha=0.25f),Offset(center.x-radius,center.y),Offset(center.x+radius,center.y),1f)
+    drawLine(colors.primary.copy(alpha=0.25f),Offset(center.x,center.y-radius),Offset(center.x,center.y+radius),1f)
+    if(theme==UiTheme.MINOS) {
+        val p=Paint(Paint.ANTI_ALIAS_FLAG).apply{color=colors.primary.toArgb();textSize=15f;typeface=Typeface.MONOSPACE}
+        drawContext.canvas.nativeCanvas.drawText("RADAR",center.x-radius,center.y-radius-7f,p)
     }
-}
-
-@Composable
-private fun TargetZoomPanel(modifier: Modifier, bitmap: ImageBitmap?, target: DetectionTarget?, color: Color, onUnlock: () -> Unit) {
-    val line = statusColor(target?.status, color)
-    Column(
-        modifier = modifier.width(188.dp).background(Color.Black.copy(alpha = 0.80f)).border(1.dp, line.copy(alpha = 0.78f)).clickable { onUnlock() }.padding(5.dp)
-    ) {
-        LegacyText("TARGET VIEW // LIVE RGB", line, 8)
-        Spacer(Modifier.height(4.dp))
-        Box(Modifier.fillMaxWidth().height(118.dp).background(Color.Black).border(0.5.dp, HudDim.copy(alpha = 0.5f)), contentAlignment = Alignment.Center) {
-            if (bitmap != null) Image(bitmap, "Locked target", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            else LegacyText("NO SIGNAL", HudRed, 9)
-        }
-        Spacer(Modifier.height(4.dp))
-        LegacyText("ID      ${target?.trackingId?.toString()?.padStart(2, '0') ?: "--"}", HudDim, 8)
-        LegacyText("CLASS   ${target?.label ?: "UNKNOWN"}", line, 8)
-        LegacyText("CONF    ${target?.let { "${(it.confidence * 100).toInt()}%" } ?: "--"}", HudDim, 8)
-        LegacyText("STATE   ${target?.status?.name ?: "LOST"}", line, 8)
-        LegacyText("TAP PANEL // RELEASE", HudDim.copy(alpha = 0.65f), 7)
+    targets.forEach{t->
+        val x=center.x+(t.normalizedBox.centerX()-0.5f)*radius*1.6f
+        val y=center.y+(t.normalizedBox.centerY()-0.5f)*radius*1.6f
+        drawCircle(if(t.trackingId==lockedId)colors.accent else statusColor(t.status,colors),if(t.trackingId==lockedId)4f else 2.5f,Offset(x,y))
     }
 }
 
 private fun updateMotionTrails(current: Map<Int, List<MotionTrailPoint>>, frame: DetectionFrame): Map<Int, List<MotionTrailPoint>> {
     val now = SystemClock.elapsedRealtime()
-    val next = current.mapValues { (_, points) -> points.filter { now - it.at <= TRAIL_MAX_AGE_MS } }.filterValues { it.isNotEmpty() }.toMutableMap()
+    val next = current.mapValues { (_, p) -> p.filter { now - it.at <= TRAIL_MAX_AGE_MS } }.filterValues { it.isNotEmpty() }.toMutableMap()
     frame.targets.forEach { target ->
         if (target.status == TrackStatus.LOST) return@forEach
         if (targetSpeed(target) < 0.006f && next[target.trackingId].isNullOrEmpty()) return@forEach
         val point = MotionTrailPoint(target.normalizedBox.centerX(), target.normalizedBox.centerY(), now)
-        val old = next[target.trackingId].orEmpty()
-        val last = old.lastOrNull()
-        if (last == null || hypot(point.x - last.x, point.y - last.y) >= 0.0045f) next[target.trackingId] = (old + point).takeLast(TRAIL_MAX_POINTS)
+        val old = next[target.trackingId].orEmpty(); val last = old.lastOrNull()
+        if (last == null || hypot(point.x-last.x, point.y-last.y) >= 0.0045f) next[target.trackingId]=(old+point).takeLast(TRAIL_MAX_POINTS)
     }
     return next
 }
 
-private fun statusColor(status: TrackStatus?, default: Color): Color = when (status) {
-    TrackStatus.PREDICTED -> HudAmber.copy(alpha = 0.85f)
-    TrackStatus.LOST -> HudRed
-    TrackStatus.ACQUIRING -> Color(0xFFA7C8AF)
-    TrackStatus.TRACKING -> default
-    null -> default
+private fun statusColor(status: TrackStatus?, colors: ThemePalette): Color = when(status){
+    TrackStatus.PREDICTED -> colors.accent.copy(alpha=0.86f)
+    TrackStatus.LOST -> colors.danger
+    TrackStatus.ACQUIRING -> colors.dim
+    TrackStatus.TRACKING -> colors.primary
+    null -> colors.primary
 }
 
-private fun targetSpeed(target: DetectionTarget): Float = hypot(target.velocityX, target.velocityY)
-private fun fastestMovingTarget(targets: List<DetectionTarget>): DetectionTarget? = targets.filter { it.status != TrackStatus.LOST }.maxByOrNull(::targetSpeed)?.takeIf { targetSpeed(it) > 0.015f }
-private fun nearestTargetToCenter(targets: List<DetectionTarget>): DetectionTarget? = targets.minByOrNull { hypot(it.normalizedBox.centerX() - 0.5f, it.normalizedBox.centerY() - 0.5f) }
+private fun targetSpeed(target: DetectionTarget): Float = hypot(target.velocityX,target.velocityY)
+private fun fastestMovingTarget(targets: List<DetectionTarget>): DetectionTarget? = targets.filter{it.status!=TrackStatus.LOST}.maxByOrNull(::targetSpeed)?.takeIf{targetSpeed(it)>0.015f}
+private fun nearestTargetToCenter(targets: List<DetectionTarget>): DetectionTarget? = targets.minByOrNull{hypot(it.normalizedBox.centerX()-0.5f,it.normalizedBox.centerY()-0.5f)}
 
-private fun mapNormalizedPoint(x: Float, y: Float, viewWidth: Float, viewHeight: Float, imageWidth: Int, imageHeight: Int): Offset {
-    if (imageWidth <= 0 || imageHeight <= 0) return Offset.Zero
-    val scale = max(viewWidth / imageWidth.toFloat(), viewHeight / imageHeight.toFloat())
-    val displayedWidth = imageWidth * scale
-    val displayedHeight = imageHeight * scale
-    val offsetX = (viewWidth - displayedWidth) / 2f
-    val offsetY = (viewHeight - displayedHeight) / 2f
-    return Offset(offsetX + x * displayedWidth, offsetY + y * displayedHeight)
+private fun mapNormalizedPoint(x:Float,y:Float,viewWidth:Float,viewHeight:Float,imageWidth:Int,imageHeight:Int):Offset{
+    if(imageWidth<=0||imageHeight<=0)return Offset.Zero
+    val scale=max(viewWidth/imageWidth.toFloat(),viewHeight/imageHeight.toFloat());val dw=imageWidth*scale;val dh=imageHeight*scale
+    return Offset((viewWidth-dw)/2f+x*dw,(viewHeight-dh)/2f+y*dh)
 }
 
-private fun mapTargetRect(normalizedBox: RectF, viewWidth: Float, viewHeight: Float, imageWidth: Int, imageHeight: Int): RectF {
-    if (imageWidth <= 0 || imageHeight <= 0) return RectF()
-    val scale = max(viewWidth / imageWidth.toFloat(), viewHeight / imageHeight.toFloat())
-    val displayedWidth = imageWidth * scale
-    val displayedHeight = imageHeight * scale
-    val offsetX = (viewWidth - displayedWidth) / 2f
-    val offsetY = (viewHeight - displayedHeight) / 2f
-    return RectF(
-        offsetX + normalizedBox.left * displayedWidth,
-        offsetY + normalizedBox.top * displayedHeight,
-        offsetX + normalizedBox.right * displayedWidth,
-        offsetY + normalizedBox.bottom * displayedHeight
-    )
+private fun mapTargetRect(normalizedBox:RectF,viewWidth:Float,viewHeight:Float,imageWidth:Int,imageHeight:Int):RectF{
+    if(imageWidth<=0||imageHeight<=0)return RectF()
+    val scale=max(viewWidth/imageWidth.toFloat(),viewHeight/imageHeight.toFloat());val dw=imageWidth*scale;val dh=imageHeight*scale;val ox=(viewWidth-dw)/2f;val oy=(viewHeight-dh)/2f
+    return RectF(ox+normalizedBox.left*dw,oy+normalizedBox.top*dh,ox+normalizedBox.right*dw,oy+normalizedBox.bottom*dh)
 }
 
-private fun cropTarget(source: Bitmap, target: DetectionTarget, frame: DetectionFrame): Bitmap? {
-    val mapped = mapTargetRect(target.normalizedBox, source.width.toFloat(), source.height.toFloat(), frame.imageWidth, frame.imageHeight)
-    val marginX = mapped.width() * 0.16f
-    val marginY = mapped.height() * 0.16f
-    val left = (mapped.left - marginX).toInt().coerceIn(0, source.width - 1)
-    val top = (mapped.top - marginY).toInt().coerceIn(0, source.height - 1)
-    val right = (mapped.right + marginX).toInt().coerceIn(left + 1, source.width)
-    val bottom = (mapped.bottom + marginY).toInt().coerceIn(top + 1, source.height)
-    return runCatching { Bitmap.createBitmap(source, left, top, right - left, bottom - top) }.getOrNull()
+private fun cropTarget(source:Bitmap,target:DetectionTarget,frame:DetectionFrame):Bitmap?{
+    val mapped=mapTargetRect(target.normalizedBox,source.width.toFloat(),source.height.toFloat(),frame.imageWidth,frame.imageHeight)
+    val mx=mapped.width()*0.16f;val my=mapped.height()*0.16f
+    val l=(mapped.left-mx).toInt().coerceIn(0,source.width-1);val t=(mapped.top-my).toInt().coerceIn(0,source.height-1)
+    val r=(mapped.right+mx).toInt().coerceIn(l+1,source.width);val b=(mapped.bottom+my).toInt().coerceIn(t+1,source.height)
+    return runCatching{Bitmap.createBitmap(source,l,t,r-l,b-t)}.getOrNull()
 }
