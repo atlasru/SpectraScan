@@ -25,8 +25,6 @@ class ObjectTrackingAnalyzer(private val callbackExecutor: Executor, private val
     @Volatile private var skyWatchEnabled=false;@Volatile private var stationaryCamera=false;@Volatile private var powerProfile=TrackingProfile.BALANCED
 
     fun setProfile(profile:TrackingProfile){powerProfile=profile;tracker.profile=profile;presentationSmoother.setProfile(profile)}
-    fun setTargetFilter(filter:TrackingFilterAlias){ }
-
     fun setTargetFilter(filter:TargetFilter){
         if(targetFilter!=filter){
             targetFilter=filter;skyWatchEnabled=filter==TargetFilter.SKY;stationaryCamera=skyWatchEnabled;motionDetector.setSkyWatch(skyWatchEnabled,stationaryCamera)
