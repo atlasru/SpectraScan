@@ -12,6 +12,16 @@
         android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
             android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
+        <activity
+            android:name=".ScannerActivity"
+            android:exported="false"
+            android:screenOrientation="fullSensor"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
+        <activity
+            android:name=".ScannerActivity071"
             android:exported="true"
             android:screenOrientation="fullSensor"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
@@ -20,15 +30,5 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-            android:name=".ScannerActivity"
-            android:exported="false"
-            android:screenOrientation="fullSensor"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
-        <activity
-            android:name=".ScannerActivity071"
-            android:exported="false"
-            android:screenOrientation="fullSensor"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
     </application>
 </manifest>
