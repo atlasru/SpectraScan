@@ -4,7 +4,12 @@ import android.graphics.RectF
 import kotlin.math.exp
 import kotlin.math.hypot
 
-/** Smooths boxes for HUD presentation only. Called on every analyzer frame. */
+/**
+ * Smooths boxes for HUD presentation only. Called on every analyzer frame.
+ *
+ * Tracking algorithms are still the source of truth; this layer only controls
+ * how quickly the visible rectangle catches up with their latest estimate.
+ */
 internal class PresentationTargetSmoother {
     private data class State(
         var box: RectF,
@@ -13,7 +18,9 @@ internal class PresentationTargetSmoother {
     )
 
     private val states = linkedMapOf<Int, State>()
+    @Volatile private var profile: TrackingProfile = TrackingProfile.BALANCED
 
+    fun setProfile(value: TrackingProfile) { profile = value }
     fun reset() = states.clear()
 
     fun apply(targets: List<DetectionTarget>, now: Long): List<DetectionTarget> {
@@ -38,21 +45,45 @@ internal class PresentationTargetSmoother {
                     ratio(desired.height(), state.box.height())
                 )
 
-                if (centerJump > 0.22f || sizeRatio > 2.2f || target.status == TrackStatus.LOST) {
+                // Only impossible geometry snaps. Normal YOLO/LK corrections — even fairly
+                // large ones — animate into place instead of visibly teleporting.
+                if (centerJump > 0.62f || sizeRatio > 4.5f) {
                     state.box = RectF(desired)
                 } else {
-                    // A critically damped-looking exponential response. With analyzer
-                    // callbacks at camera rate, this appears much smoother than YOLO-rate boxes.
-                    val response = when (target.status) {
-                        TrackStatus.TRACKING -> 18f
-                        TrackStatus.ACQUIRING -> 13f
-                        TrackStatus.PREDICTED -> 9f
-                        TrackStatus.LOST -> 24f
+                    val baseResponse = when (profile) {
+                        TrackingProfile.SMOOTH -> 9.5f
+                        TrackingProfile.BALANCED -> 14.0f
+                        TrackingProfile.RESPONSIVE -> 19.0f
                     }
-                    val alpha = (1f - exp(-response * dt)).coerceIn(0.06f, 0.92f)
+                    val statusScale = when (target.status) {
+                        TrackStatus.TRACKING -> 1.00f
+                        TrackStatus.ACQUIRING -> 0.82f
+                        TrackStatus.PREDICTED -> 0.72f
+                        TrackStatus.LOST -> 0.60f
+                    }
 
-                    // Very small look-ahead masks detector latency without allowing runaway drift.
-                    val lookAhead = if (target.status == TrackStatus.TRACKING || target.status == TrackStatus.PREDICTED) 0.040f else 0f
+                    // Catch up faster when the detector makes a large correction, but keep
+                    // several rendered intermediate positions so the eye sees movement.
+                    val jumpBoost = when {
+                        centerJump > 0.30f -> 2.10f
+                        centerJump > 0.16f -> 1.70f
+                        centerJump > 0.08f -> 1.35f
+                        else -> 1.00f
+                    }
+                    val response = baseResponse * statusScale * jumpBoost
+                    val maxAlpha = when (profile) {
+                        TrackingProfile.SMOOTH -> 0.76f
+                        TrackingProfile.BALANCED -> 0.84f
+                        TrackingProfile.RESPONSIVE -> 0.88f
+                    }
+                    val alpha = (1f - exp(-response * dt)).coerceIn(0.035f, maxAlpha)
+
+                    val lookAhead = when {
+                        target.status != TrackStatus.TRACKING && target.status != TrackStatus.PREDICTED -> 0f
+                        profile == TrackingProfile.RESPONSIVE -> 0.028f
+                        profile == TrackingProfile.BALANCED -> 0.036f
+                        else -> 0.045f
+                    }
                     val predicted = shift(desired, target.velocityX * lookAhead, target.velocityY * lookAhead)
                     state.box = RectF(
                         lerp(state.box.left, predicted.left, alpha),
