@@ -117,6 +117,7 @@ private fun App071() {
 private fun Scanner071() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("spectrascan_ui", Context.MODE_PRIVATE) }
+    val evidence = remember { EvidenceStore071(context) }
     var theme by remember {
         mutableStateOf(runCatching { UiTheme071.valueOf(prefs.getString("theme071", UiTheme071.STANDARD.name)!!) }.getOrDefault(UiTheme071.STANDARD))
     }
@@ -139,6 +140,9 @@ private fun Scanner071() {
     var autoNv by remember { mutableStateOf(true) }
     var motionDetectionEnabled by remember { mutableStateOf(false) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var eventLog by remember { mutableStateOf(evidence.snapshot()) }
+    var logOpen by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
 
     val latestFrame by rememberUpdatedState(frame)
     val locked = frame.targets.firstOrNull { it.trackingId == lockedId }
@@ -148,6 +152,13 @@ private fun Scanner071() {
         locked != null -> locked.status.name
         frame.targets.isEmpty() -> "ACQUIRING"
         else -> "TRACKING"
+    }
+
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            delay(1_400)
+            notice = null
+        }
     }
 
     LaunchedEffect(lockedId, previewView) {
@@ -169,8 +180,10 @@ private fun Scanner071() {
             onZoomRange = { min, max -> minZoom = min; maxZoom = max; zoom = zoom.coerceIn(min, max) },
             onPreview = { previewView = it },
             onFrame = { next ->
-                frame = if (next.detectionThrottled && next.targets.isEmpty()) next.copy(targets = frame.targets) else next
-                trails = updateTrails071(trails, frame)
+                val resolved = if (next.detectionThrottled && next.targets.isEmpty()) next.copy(targets = frame.targets) else next
+                frame = resolved
+                trails = updateTrails071(trails, resolved)
+                if (evidence.observe(resolved).isNotEmpty()) eventLog = evidence.snapshot()
             }
         )
 
@@ -178,7 +191,17 @@ private fun Scanner071() {
             frame = frame, lockedId = lockedId, theme = theme, colors = colors,
             trails = if (trailsEnabled) trails else emptyMap(),
             minZoom = minZoom, maxZoom = maxZoom,
-            onTargetTap = { id -> lockedId = if (lockedId == id) null else id },
+            onTargetTap = { id ->
+                val target = frame.targets.firstOrNull { it.trackingId == id }
+                if (lockedId == id) {
+                    evidence.manual(target, "UNLOCK")
+                    lockedId = null
+                } else {
+                    lockedId = id
+                    evidence.manual(target, "LOCK")
+                }
+                eventLog = evidence.snapshot()
+            },
             onZoomGesture = { factor -> zoom = (zoom * factor).coerceIn(minZoom, maxZoom) }
         )
 
@@ -194,14 +217,32 @@ private fun Scanner071() {
         if (lockedId != null) TargetPanel071(
             modifier = Modifier.align(Alignment.TopEnd).padding(top = if (theme == UiTheme071.MINOS) 18.dp else 96.dp, end = 14.dp),
             theme = theme, colors = colors, bitmap = zoomBitmap, target = locked
-        ) { lockedId = null }
+        ) {
+            evidence.manual(locked, "UNLOCK")
+            eventLog = evidence.snapshot()
+            lockedId = null
+        }
 
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp, start = 8.dp, end = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(if (theme == UiTheme071.FUTURE) 5.dp else 0.dp), verticalAlignment = Alignment.CenterVertically
         ) {
-            Quick071("LOCK", frame.targets.isNotEmpty(), theme = theme, colors = colors) { lockedId = nearest071(frame.targets)?.trackingId }
-            Quick071(if (theme == UiTheme071.MINOS) "MOTION" else "M-LOCK", frame.targets.any { speed071(it) > .015f }, theme = theme, colors = colors) { lockedId = fastest071(frame.targets)?.trackingId }
+            Quick071("LOCK", frame.targets.isNotEmpty(), theme = theme, colors = colors) {
+                val target = nearest071(frame.targets)
+                lockedId = target?.trackingId
+                if (target != null) {
+                    evidence.manual(target, "LOCK")
+                    eventLog = evidence.snapshot()
+                }
+            }
+            Quick071(if (theme == UiTheme071.MINOS) "MOTION" else "M-LOCK", frame.targets.any { speed071(it) > .015f }, theme = theme, colors = colors) {
+                val target = fastest071(frame.targets)
+                lockedId = target?.trackingId
+                if (target != null) {
+                    evidence.manual(target, "MOTION_LOCK")
+                    eventLog = evidence.snapshot()
+                }
+            }
             Quick071("F:${filter.title}", true, selected = true, theme = theme, colors = colors) { lockedId = null; trails = emptyMap(); filter = filter.next() }
             Quick071(fmtZoom071(zoom), true, selected = zoom != 1f, theme = theme, colors = colors) { zoom = 1f.coerceIn(minZoom, maxZoom) }
             Quick071(if (theme == UiTheme071.MINOS) "MENU" else "SET", true, selected = settingsOpen, theme = theme, colors = colors) { settingsOpen = !settingsOpen }
@@ -212,15 +253,42 @@ private fun Scanner071() {
             zoom = zoom, minZoom = minZoom, maxZoom = maxZoom,
             exposure = exposure, gain = gain, monochrome = monochrome, autoNv = autoNv,
             profile = profile, trailsEnabled = trailsEnabled, trailsPresent = trails.isNotEmpty(),
-            motionDetectionEnabled = motionDetectionEnabled,
+            motionDetectionEnabled = motionDetectionEnabled, eventCount = eventLog.size, logOpen = logOpen,
             onTheme = {
                 val next = theme.next(); theme = next; prefs.edit().putString("theme071", next.name).apply()
             },
+            onSnap = {
+                val bitmap = previewView?.bitmap
+                if (bitmap == null) {
+                    notice = "NO FRAME"
+                } else {
+                    val saved = evidence.saveAnnotatedSnapshot(bitmap, frame, lockedId)
+                    if (saved != null) {
+                        evidence.manual(locked, "SNAP")
+                        eventLog = evidence.snapshot()
+                        notice = "SNAP SAVED"
+                    } else notice = "SNAP FAILED"
+                }
+            },
+            onLog = { logOpen = !logOpen },
+            onExportLog = { notice = if (evidence.exportText() != null) "LOG EXPORTED" else "EXPORT FAILED" },
+            onClearLog = { evidence.clear(); eventLog = emptyList(); notice = "LOG CLEARED" },
             onClose = { settingsOpen = false }, onExposure = { exposure = it }, onGain = { gain = it },
             onMonochrome = { monochrome = !monochrome }, onAutoNv = { autoNv = !autoNv }, onProfile = { profile = profile.next() },
             onMotionDetection = { motionDetectionEnabled = !motionDetectionEnabled; lockedId = null; trails = emptyMap() },
             onTrails = { trailsEnabled = !trailsEnabled; if (!trailsEnabled) trails = emptyMap() }, onClear = { trails = emptyMap() }
         )
+
+        if (logOpen) EventLogPanel071(
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 78.dp),
+            colors = colors, entries = eventLog
+        )
+
+        notice?.let {
+            Box(
+                Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = .82f)).border(1.dp, colors.primary).padding(horizontal = 14.dp, vertical = 8.dp)
+            ) { Text(it, color = colors.primary, fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
+        }
     }
 }
 
@@ -272,7 +340,9 @@ private fun Settings071(
     zoom: Float, minZoom: Float, maxZoom: Float, exposure: Int, gain: Float,
     monochrome: Boolean, autoNv: Boolean, profile: TrackingProfile,
     trailsEnabled: Boolean, trailsPresent: Boolean, motionDetectionEnabled: Boolean,
-    onTheme: () -> Unit, onClose: () -> Unit, onExposure: (Int) -> Unit, onGain: (Float) -> Unit,
+    eventCount: Int, logOpen: Boolean,
+    onTheme: () -> Unit, onSnap: () -> Unit, onLog: () -> Unit, onExportLog: () -> Unit, onClearLog: () -> Unit,
+    onClose: () -> Unit, onExposure: (Int) -> Unit, onGain: (Float) -> Unit,
     onMonochrome: () -> Unit, onAutoNv: () -> Unit, onProfile: () -> Unit,
     onMotionDetection: () -> Unit, onTrails: () -> Unit, onClear: () -> Unit
 ) {
@@ -298,11 +368,40 @@ private fun Settings071(
             Chip071(if (motionDetectionEnabled) "MOTION DETECTION ON" else "MOTION DETECTION OFF", true, motionDetectionEnabled, theme, colors, onMotionDetection)
             Chip071(if (trailsEnabled) "MOTION TRAIL ON" else "MOTION TRAIL OFF", true, trailsEnabled, theme, colors, onTrails)
             Chip071("CLEAR TRAILS", trailsPresent, theme = theme, colors = colors, onClick = onClear)
+            Text("EVIDENCE / SESSION", color = colors.primary.copy(alpha=.72f), fontSize = 8.sp)
+            Chip071("TAKE SNAP", true, theme = theme, colors = colors, onClick = onSnap)
+            Chip071("EVENT LOG $eventCount", true, selected = logOpen, theme = theme, colors = colors, onClick = onLog)
+            Chip071("EXPORT LOG", eventCount > 0, theme = theme, colors = colors, onClick = onExportLog)
+            Chip071("CLEAR LOG", eventCount > 0, theme = theme, colors = colors, onClick = onClearLog)
             Text("HUD: ${theme.title}", color = colors.primary.copy(alpha = .7f), fontSize = 8.sp)
             Text("ISP: SHARPEN + DNR + STABILIZATION", color = colors.primary.copy(alpha = .7f), fontSize = 8.sp)
         }
         val shape = RoundedCornerShape(if (square) 0.dp else 10.dp)
         Box(modifier = Modifier.align(Alignment.TopEnd).padding(top = 42.dp, end = 12.dp).border(1.dp, colors.primary, shape).background(Color.Black.copy(alpha = .92f), shape).clickable(onClick = onClose).padding(horizontal = 18.dp, vertical = 12.dp)) { Text("CLOSE", color = colors.primary, fontSize = 11.sp) }
+    }
+}
+
+@Composable
+private fun EventLogPanel071(modifier: Modifier, colors: Palette071, entries: List<EvidenceStore071.Entry>) {
+    Column(
+        modifier.width(310.dp).height(320.dp).background(Color.Black.copy(alpha=.90f)).border(1.dp, colors.primary.copy(alpha=.72f)).padding(8.dp)
+    ) {
+        Text("EVENT LOG // ${entries.size}", color = colors.primary, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+        Text("latest events", color = colors.dim.copy(alpha=.70f), fontFamily = FontFamily.Monospace, fontSize = 7.sp)
+        Column(Modifier.fillMaxSize().padding(top = 6.dp).verticalScroll(rememberScrollState())) {
+            if (entries.isEmpty()) {
+                Text("NO EVENTS", color = colors.dim, fontFamily = FontFamily.Monospace, fontSize = 8.sp)
+            } else {
+                entries.takeLast(60).asReversed().forEach { entry ->
+                    val color = when (entry.event) {
+                        "LOST", "DISAPPEARED" -> colors.danger
+                        "LOCK", "MOTION_LOCK", "SNAP" -> colors.accent
+                        else -> colors.primary
+                    }
+                    Text(entry.line(), color = color.copy(alpha=.90f), fontFamily = FontFamily.Monospace, fontSize = 7.sp, modifier = Modifier.padding(bottom = 3.dp))
+                }
+            }
+        }
     }
 }
 
