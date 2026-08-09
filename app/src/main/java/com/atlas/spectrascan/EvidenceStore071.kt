@@ -3,12 +3,18 @@ package com.atlas.spectrascan
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.os.Environment
 import android.provider.MediaStore
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.max
 
 /** Lightweight evidence/session storage kept outside the tracking pipeline. */
 class EvidenceStore071(private val context: Context) {
@@ -65,8 +71,7 @@ class EvidenceStore071(private val context: Context) {
 
     @Synchronized
     fun manual(target: DetectionTarget?, event: String, now: Long = System.currentTimeMillis()) {
-        val entry = Entry(now, "USER", target?.label ?: "TARGET", target?.confidence ?: 0f, target?.trackingId ?: -1, event)
-        add(entry)
+        add(Entry(now, "USER", target?.label ?: "TARGET", target?.confidence ?: 0f, target?.trackingId ?: -1, event))
     }
 
     @Synchronized
@@ -98,7 +103,46 @@ class EvidenceStore071(private val context: Context) {
         }
     }
 
-    fun saveSnapshot(bitmap: Bitmap): String? {
+    fun saveAnnotatedSnapshot(bitmap: Bitmap, frame: DetectionFrame, lockedId: Int?): String? {
+        val annotated = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(annotated)
+        val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = max(2f, annotated.width / 540f)
+            color = Color.rgb(97, 255, 178)
+        }
+        val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            textSize = max(18f, annotated.width / 34f)
+            color = Color.rgb(97, 255, 178)
+        }
+        val shadow = Paint(text).apply { color = Color.argb(180, 0, 0, 0); strokeWidth = 6f; style = Paint.Style.STROKE }
+
+        frame.targets.forEach { target ->
+            val r = mappedRect(target.normalizedBox, annotated.width.toFloat(), annotated.height.toFloat(), frame.imageWidth, frame.imageHeight)
+            val locked = target.trackingId == lockedId
+            val color = when {
+                locked -> Color.rgb(255, 214, 74)
+                target.status == TrackStatus.LOST -> Color.rgb(255, 83, 83)
+                target.status == TrackStatus.PREDICTED -> Color.rgb(255, 163, 60)
+                else -> Color.rgb(97, 255, 178)
+            }
+            stroke.color = color; text.color = color
+            canvas.drawRect(r, stroke)
+            val label = "YOLO/${target.label.uppercase(Locale.US)}/${(target.confidence * 100).toInt()}%/#${target.trackingId}"
+            val tx = r.left.coerceAtLeast(4f)
+            val ty = (r.top - 8f).coerceAtLeast(text.textSize + 4f)
+            canvas.drawText(label, tx, ty, shadow)
+            canvas.drawText(label, tx, ty, text)
+        }
+
+        val stampText = "SPECTRASCAN ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())}"
+        text.color = Color.rgb(97, 255, 178)
+        val sx = 12f; val sy = annotated.height - 18f
+        canvas.drawText(stampText, sx, sy, shadow)
+        canvas.drawText(stampText, sx, sy, text)
+
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "SpectraScan_$stamp.jpg")
@@ -109,7 +153,7 @@ class EvidenceStore071(private val context: Context) {
         val resolver = context.contentResolver
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
         return runCatching {
-            resolver.openOutputStream(uri)?.use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 94, out) }
+            resolver.openOutputStream(uri)?.use { out -> annotated.compress(Bitmap.CompressFormat.JPEG, 94, out) }
                 ?: error("No output stream")
             values.clear(); values.put(MediaStore.Images.Media.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
@@ -118,5 +162,15 @@ class EvidenceStore071(private val context: Context) {
             resolver.delete(uri, null, null)
             null
         }
+    }
+
+    private fun mappedRect(box: RectF, vw: Float, vh: Float, iw: Int, ih: Int): RectF {
+        if (iw <= 0 || ih <= 0) return RectF()
+        val scale = max(vw / iw.toFloat(), vh / ih.toFloat())
+        val dw = iw * scale
+        val dh = ih * scale
+        val ox = (vw - dw) / 2f
+        val oy = (vh - dh) / 2f
+        return RectF(ox + box.left * dw, oy + box.top * dh, ox + box.right * dw, oy + box.bottom * dh)
     }
 }
