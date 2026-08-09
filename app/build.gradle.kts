@@ -12,8 +12,8 @@ android {
         applicationId = "com.atlas.spectrascan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.13.3"
+        versionCode = 33
+        versionName = "0.14.0"
     }
 
     signingConfigs {
