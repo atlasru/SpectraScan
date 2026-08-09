@@ -8,9 +8,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
-import android.os.Environment
 import android.provider.MediaStore
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -88,18 +86,30 @@ class EvidenceStore071(private val context: Context) {
         while (entries.size > 500) entries.removeFirst()
     }
 
-    fun exportText(): File {
-        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "SpectraScan")
-        dir.mkdirs()
+    fun exportText(): String? {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        return File(dir, "session_$stamp.txt").also { file ->
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, "SpectraScan_session_$stamp.txt")
+            put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/SpectraScan")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return null
+        return runCatching {
             val body = buildString {
                 appendLine("SPECTRASCAN SESSION LOG")
                 appendLine("Generated: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
                 appendLine()
                 snapshot().forEach { appendLine(it.line()) }
             }
-            file.writeText(body)
+            resolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(body) } ?: error("No output stream")
+            values.clear(); values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            uri.toString()
+        }.getOrElse {
+            resolver.delete(uri, null, null)
+            null
         }
     }
 
