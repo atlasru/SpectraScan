@@ -8,8 +8,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -81,8 +81,12 @@ fun SessionStatsPanel071(
             .border(1.dp, primary.copy(alpha = .75f))
             .padding(10.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("SESSION // ${if (summary.running) "RECORDING" else "SUMMARY"}", color = if (summary.running) accent else primary, fontFamily = FontFamily.Monospace, fontSize = 10.sp, modifier = Modifier.weight(1f))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("SESSION // ${if (summary.running) "RECORDING" else "SUMMARY"}", color = if (summary.running) accent else primary, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             Text("CLOSE", color = primary, fontFamily = FontFamily.Monospace, fontSize = 8.sp, modifier = Modifier.clickable(onClick = onClose).padding(6.dp))
         }
         Text("TIME ${formatSessionTime071(summary.elapsedMs)}", color = primary, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
