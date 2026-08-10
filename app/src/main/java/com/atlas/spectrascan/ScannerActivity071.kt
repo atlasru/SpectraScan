@@ -118,6 +118,7 @@ private fun Scanner071() {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("spectrascan_ui", Context.MODE_PRIVATE) }
     val evidence = remember { EvidenceStore071(context) }
+    val session = remember { SessionStore071() }
     var theme by remember {
         mutableStateOf(runCatching { UiTheme071.valueOf(prefs.getString("theme071", UiTheme071.STANDARD.name)!!) }.getOrDefault(UiTheme071.STANDARD))
     }
@@ -142,6 +143,8 @@ private fun Scanner071() {
     var settingsOpen by remember { mutableStateOf(false) }
     var eventLog by remember { mutableStateOf(evidence.snapshot()) }
     var logOpen by remember { mutableStateOf(false) }
+    var sessionStatsOpen by remember { mutableStateOf(false) }
+    var sessionSummary by remember { mutableStateOf(session.summary()) }
     var notice by remember { mutableStateOf<String?>(null) }
 
     val latestFrame by rememberUpdatedState(frame)
@@ -161,6 +164,14 @@ private fun Scanner071() {
         }
     }
 
+    LaunchedEffect(sessionSummary.running) {
+        while (session.isRunning()) {
+            sessionSummary = session.summary()
+            delay(500)
+        }
+        sessionSummary = session.summary()
+    }
+
     LaunchedEffect(lockedId, previewView) {
         while (lockedId != null) {
             val f = latestFrame
@@ -170,6 +181,20 @@ private fun Scanner071() {
             delay(if (theme == UiTheme071.MINOS) 130 else 180)
         }
         zoomBitmap = null
+    }
+
+    fun takeSnap071() {
+        val bitmap = previewView?.bitmap
+        if (bitmap == null) {
+            notice = "NO FRAME"
+            return
+        }
+        val saved = evidence.saveAnnotatedSnapshot(bitmap, frame, lockedId)
+        if (saved != null) {
+            evidence.manual(locked, "SNAP")
+            eventLog = evidence.snapshot()
+            notice = "SNAP SAVED"
+        } else notice = "SNAP FAILED"
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -184,6 +209,8 @@ private fun Scanner071() {
                 frame = resolved
                 trails = updateTrails071(trails, resolved)
                 if (evidence.observe(resolved).isNotEmpty()) eventLog = evidence.snapshot()
+                session.observe(resolved)
+                if (session.isRunning()) sessionSummary = session.summary()
             }
         )
 
@@ -223,6 +250,32 @@ private fun Scanner071() {
             lockedId = null
         }
 
+        Box(Modifier.align(Alignment.CenterStart)) {
+            SessionSideControls071(
+                primary = colors.primary,
+                accent = colors.accent,
+                running = sessionSummary.running,
+                elapsedMs = sessionSummary.elapsedMs,
+                uniqueTargets = sessionSummary.uniqueTargets,
+                onSnap = { takeSnap071() },
+                onSessionToggle = {
+                    if (session.isRunning()) {
+                        session.stop()
+                        evidence.manual(null, "SESSION_STOP")
+                        notice = "SESSION STOPPED"
+                        sessionStatsOpen = true
+                    } else {
+                        session.start()
+                        evidence.manual(null, "SESSION_START")
+                        notice = "SESSION STARTED"
+                    }
+                    sessionSummary = session.summary()
+                    eventLog = evidence.snapshot()
+                },
+                onOpenStats = { sessionStatsOpen = true }
+            )
+        }
+
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp, start = 8.dp, end = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(if (theme == UiTheme071.FUTURE) 5.dp else 0.dp), verticalAlignment = Alignment.CenterVertically
@@ -254,23 +307,12 @@ private fun Scanner071() {
             exposure = exposure, gain = gain, monochrome = monochrome, autoNv = autoNv,
             profile = profile, trailsEnabled = trailsEnabled, trailsPresent = trails.isNotEmpty(),
             motionDetectionEnabled = motionDetectionEnabled, eventCount = eventLog.size, logOpen = logOpen,
+            sessionSummary = sessionSummary,
             onTheme = {
                 val next = theme.next(); theme = next; prefs.edit().putString("theme071", next.name).apply()
             },
-            onSnap = {
-                val bitmap = previewView?.bitmap
-                if (bitmap == null) {
-                    notice = "NO FRAME"
-                } else {
-                    val saved = evidence.saveAnnotatedSnapshot(bitmap, frame, lockedId)
-                    if (saved != null) {
-                        evidence.manual(locked, "SNAP")
-                        eventLog = evidence.snapshot()
-                        notice = "SNAP SAVED"
-                    } else notice = "SNAP FAILED"
-                }
-            },
-            onLog = { logOpen = !logOpen },
+            onLog = { logOpen = true; settingsOpen = false },
+            onSessionStats = { sessionStatsOpen = true; settingsOpen = false },
             onExportLog = { notice = if (evidence.exportText() != null) "LOG EXPORTED" else "EXPORT FAILED" },
             onClearLog = { evidence.clear(); eventLog = emptyList(); notice = "LOG CLEARED" },
             onClose = { settingsOpen = false }, onExposure = { exposure = it }, onGain = { gain = it },
@@ -279,10 +321,20 @@ private fun Scanner071() {
             onTrails = { trailsEnabled = !trailsEnabled; if (!trailsEnabled) trails = emptyMap() }, onClear = { trails = emptyMap() }
         )
 
-        if (logOpen) EventLogPanel071(
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 78.dp),
-            colors = colors, entries = eventLog
-        )
+        if (logOpen) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .08f)).clickable { logOpen = false })
+            EventLogPanel071(
+                modifier = Modifier.align(Alignment.BottomStart).padding(start = 8.dp, bottom = 78.dp),
+                colors = colors, entries = eventLog
+            )
+        }
+
+        if (sessionStatsOpen) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .08f)).clickable { sessionStatsOpen = false })
+            Box(Modifier.align(Alignment.Center)) {
+                SessionStatsPanel071(colors.primary, colors.dim, colors.accent, sessionSummary) { sessionStatsOpen = false }
+            }
+        }
 
         notice?.let {
             Box(
@@ -340,8 +392,8 @@ private fun Settings071(
     zoom: Float, minZoom: Float, maxZoom: Float, exposure: Int, gain: Float,
     monochrome: Boolean, autoNv: Boolean, profile: TrackingProfile,
     trailsEnabled: Boolean, trailsPresent: Boolean, motionDetectionEnabled: Boolean,
-    eventCount: Int, logOpen: Boolean,
-    onTheme: () -> Unit, onSnap: () -> Unit, onLog: () -> Unit, onExportLog: () -> Unit, onClearLog: () -> Unit,
+    eventCount: Int, logOpen: Boolean, sessionSummary: SessionStore071.Summary,
+    onTheme: () -> Unit, onLog: () -> Unit, onSessionStats: () -> Unit, onExportLog: () -> Unit, onClearLog: () -> Unit,
     onClose: () -> Unit, onExposure: (Int) -> Unit, onGain: (Float) -> Unit,
     onMonochrome: () -> Unit, onAutoNv: () -> Unit, onProfile: () -> Unit,
     onMotionDetection: () -> Unit, onTrails: () -> Unit, onClear: () -> Unit
@@ -368,8 +420,8 @@ private fun Settings071(
             Chip071(if (motionDetectionEnabled) "MOTION DETECTION ON" else "MOTION DETECTION OFF", true, motionDetectionEnabled, theme, colors, onMotionDetection)
             Chip071(if (trailsEnabled) "MOTION TRAIL ON" else "MOTION TRAIL OFF", true, trailsEnabled, theme, colors, onTrails)
             Chip071("CLEAR TRAILS", trailsPresent, theme = theme, colors = colors, onClick = onClear)
-            Text("EVIDENCE / SESSION", color = colors.primary.copy(alpha=.72f), fontSize = 8.sp)
-            Chip071("TAKE SNAP", true, theme = theme, colors = colors, onClick = onSnap)
+            Text("SESSION / EVIDENCE", color = colors.primary.copy(alpha=.72f), fontSize = 8.sp)
+            Chip071("SESSION ${if (sessionSummary.running) "REC ${formatSessionTime071(sessionSummary.elapsedMs)}" else "STATS ${sessionSummary.uniqueTargets}"}", true, selected = sessionSummary.running, theme = theme, colors = colors, onClick = onSessionStats)
             Chip071("EVENT LOG $eventCount", true, selected = logOpen, theme = theme, colors = colors, onClick = onLog)
             Chip071("EXPORT LOG", eventCount > 0, theme = theme, colors = colors, onClick = onExportLog)
             Chip071("CLEAR LOG", eventCount > 0, theme = theme, colors = colors, onClick = onClearLog)
@@ -387,7 +439,7 @@ private fun EventLogPanel071(modifier: Modifier, colors: Palette071, entries: Li
         modifier.width(310.dp).height(320.dp).background(Color.Black.copy(alpha=.90f)).border(1.dp, colors.primary.copy(alpha=.72f)).padding(8.dp)
     ) {
         Text("EVENT LOG // ${entries.size}", color = colors.primary, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
-        Text("latest events", color = colors.dim.copy(alpha=.70f), fontFamily = FontFamily.Monospace, fontSize = 7.sp)
+        Text("latest events // tap outside to close", color = colors.dim.copy(alpha=.70f), fontFamily = FontFamily.Monospace, fontSize = 7.sp)
         Column(Modifier.fillMaxSize().padding(top = 6.dp).verticalScroll(rememberScrollState())) {
             if (entries.isEmpty()) {
                 Text("NO EVENTS", color = colors.dim, fontFamily = FontFamily.Monospace, fontSize = 8.sp)
@@ -395,7 +447,7 @@ private fun EventLogPanel071(modifier: Modifier, colors: Palette071, entries: Li
                 entries.takeLast(60).asReversed().forEach { entry ->
                     val color = when (entry.event) {
                         "LOST", "DISAPPEARED" -> colors.danger
-                        "LOCK", "MOTION_LOCK", "SNAP" -> colors.accent
+                        "LOCK", "MOTION_LOCK", "SNAP", "SESSION_START", "SESSION_STOP" -> colors.accent
                         else -> colors.primary
                     }
                     Text(entry.line(), color = color.copy(alpha=.90f), fontFamily = FontFamily.Monospace, fontSize = 7.sp, modifier = Modifier.padding(bottom = 3.dp))
