@@ -14,6 +14,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -21,6 +26,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
+import kotlinx.coroutines.delay
 
 @Composable
 fun SessionSideControls071(
@@ -33,6 +39,17 @@ fun SessionSideControls071(
     onSessionToggle: () -> Unit,
     onOpenStats: () -> Unit
 ) {
+    var lockMode by remember { mutableStateOf(PrecisionLockControl071.mode()) }
+    var lockTelemetry by remember { mutableStateOf(PrecisionLockControl071.telemetry()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            lockMode = PrecisionLockControl071.mode()
+            lockTelemetry = PrecisionLockControl071.telemetry()
+            delay(250)
+        }
+    }
+
     Column(
         modifier = Modifier.padding(start = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -40,6 +57,29 @@ fun SessionSideControls071(
     ) {
         SideButton071("SNAP", primary, onSnap)
         SideButton071(if (running) "REC ■" else "SESSION", if (running) accent else primary, onSessionToggle)
+        SideButton071(
+            "P-LOCK ${lockMode.title}",
+            if (lockMode == LockTrackingMode071.PRECISION) accent else primary
+        ) {
+            lockMode = PrecisionLockControl071.toggleMode()
+            lockTelemetry = PrecisionLockControl071.telemetry()
+        }
+        if (lockMode == LockTrackingMode071.PRECISION) {
+            val id = lockTelemetry.trackingId?.let { "#$it" } ?: "#--"
+            val flow = (lockTelemetry.flowScore * 100f).toInt()
+            Text(
+                "$id ${lockTelemetry.state} // FLOW $flow%",
+                color = when (lockTelemetry.state) {
+                    "FLOW", "ANCHORED" -> primary
+                    "SEARCH" -> accent
+                    "LOST" -> Color(0xFFFF5353)
+                    else -> primary.copy(alpha = .72f)
+                },
+                fontFamily = FontFamily.Monospace,
+                fontSize = 7.sp,
+                modifier = Modifier.background(Color.Black.copy(alpha = .56f)).padding(horizontal = 5.dp, vertical = 3.dp)
+            )
+        }
         if (running) {
             Text(
                 "${formatSessionTime071(elapsedMs)} // TGT $uniqueTargets",
