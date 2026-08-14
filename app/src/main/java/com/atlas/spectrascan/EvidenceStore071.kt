@@ -52,7 +52,8 @@ class EvidenceStore071(private val context: Context) {
                 else -> null
             }
             if (event != null) {
-                val entry = Entry(now, "YOLO", target.label, target.confidence, target.trackingId, event)
+                val source = if (target.fromFlowTracker) "FLOW" else "YOLO"
+                val entry = Entry(now, source, target.label, target.confidence, target.trackingId, event)
                 add(entry); emitted += entry
             }
             lastSeen[target.trackingId] = Snapshot(target.label, bucket, target.status, now)
@@ -69,6 +70,7 @@ class EvidenceStore071(private val context: Context) {
 
     @Synchronized
     fun manual(target: DetectionTarget?, event: String, now: Long = System.currentTimeMillis()) {
+        PrecisionLockControl071.onUserEvent(target, event)
         add(Entry(now, "USER", target?.label ?: "TARGET", target?.confidence ?: 0f, target?.trackingId ?: -1, event))
     }
 
@@ -140,7 +142,8 @@ class EvidenceStore071(private val context: Context) {
             }
             stroke.color = color; text.color = color
             canvas.drawRect(r, stroke)
-            val label = "YOLO/${target.label.uppercase(Locale.US)}/${(target.confidence * 100).toInt()}%/#${target.trackingId}"
+            val source = if (target.fromFlowTracker) "FLOW" else "YOLO"
+            val label = "$source/${target.label.uppercase(Locale.US)}/${(target.confidence * 100).toInt()}%/#${target.trackingId}"
             val tx = r.left.coerceAtLeast(4f)
             val ty = (r.top - 8f).coerceAtLeast(text.textSize + 4f)
             canvas.drawText(label, tx, ty, shadow)
