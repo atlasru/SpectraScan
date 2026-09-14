@@ -12,13 +12,11 @@ import kotlin.math.hypot
 import kotlin.math.max
 
 /**
- * Stable legacy-first semantic pipeline with an optional lock-only precision bridge.
+ * Semantic YOLO detections own identity/classification. Sparse LK owns short-lived
+ * frame-to-frame geometry between YOLO anchors, so visible boxes follow motion at
+ * analyzer-frame rate instead of waiting for the next neural-network pass.
  *
- * Normal tracking remains the proven 0.11.6/0.15.x path: YOLO/bright detections are
- * authoritative and HybridTracker only associates/smooths/predicts them. When the user
- * explicitly enables Precision Lock, sparse LK is allowed to move only the selected
- * target between YOLO anchors. LK is never fed back into HybridTracker and can never
- * create a new semantic target.
+ * Precision Lock keeps its dedicated tracker and stricter reacquisition path.
  */
 class ObjectTrackingAnalyzer(
     private val callbackExecutor: Executor,
@@ -29,6 +27,7 @@ class ObjectTrackingAnalyzer(
     private val tracker = HybridTracker()
     private val motionDetector = MotionFlowDetector()
     private val presentationSmoother = PresentationTargetSmoother()
+    private val realtimeTracker = SparseFeatureTracker()
     private val precisionTracker = SparseFeatureTracker()
     private val yoloDetector = lazy { YoloDetector(SpectraScanApplication.appContext) }
 
@@ -38,6 +37,7 @@ class ObjectTrackingAnalyzer(
     private var lastYoloMs = 0L
     private var lastYoloFps = 0
     private var lastZoomGeneration = 0L
+    private var realtimeSeeded = false
 
     private var precisionRequestedId: Int? = null
     private var precisionSeeded = false
@@ -92,6 +92,8 @@ class ObjectTrackingAnalyzer(
         tracker.reset()
         motionDetector.reset()
         presentationSmoother.reset()
+        realtimeTracker.reset()
+        realtimeSeeded = false
         resetPrecisionBridge()
         lastYoloAt = 0L
         previousYoloAt = 0L
@@ -149,6 +151,8 @@ class ObjectTrackingAnalyzer(
             if (zoomChanged) {
                 lastZoomGeneration = zoomGeneration
                 presentationSmoother.reset()
+                realtimeTracker.reset()
+                realtimeSeeded = false
                 precisionTracker.reset()
                 precisionSeeded = false
                 precisionLastBox = precisionSelection?.box()
@@ -157,8 +161,20 @@ class ObjectTrackingAnalyzer(
             }
             val zoomBoost = ZoomBoostSignal.isActive(now)
 
-            // The precision bridge runs only for the explicit selected ID. It reads the
-            // same ImageProxy but never modifies semantic tracker state.
+            // General realtime geometry bridge. It may move only IDs that already
+            // exist in HybridTracker; applyFlow cannot create or semantically confirm.
+            val realtimeFlowResult = if (
+                realtimeSeeded && !zoomChanged && activeFilter != TargetFilter.MOTION
+            ) {
+                realtimeTracker.track(imageProxy, rotation, now)
+            } else null
+            val realtimeFlowActive = realtimeFlowResult?.observations?.isNotEmpty() == true
+            val realtimeTargets = if (realtimeFlowActive) {
+                tracker.applyFlow(realtimeFlowResult!!.observations, now)
+            } else null
+
+            // Precision Lock keeps a dedicated bridge so selected-target behavior and
+            // reacquisition thresholds remain independent from ordinary tracking.
             val flowResult = if (precisionSelection != null && precisionSeeded && !zoomChanged) {
                 precisionTracker.track(imageProxy, rotation, now)
             } else null
@@ -171,8 +187,6 @@ class ObjectTrackingAnalyzer(
                 precisionLastGoodAt = now
             }
 
-            // Global motion remains available only when the user explicitly asks for
-            // MOTION/SKY behaviour. It is not mixed into ordinary semantic tracking.
             val useMotion = motionDetectionEnabled || skyWatchEnabled || activeFilter == TargetFilter.MOTION
             val motionResult = if (useMotion) {
                 motionDetector.analyze(imageProxy, rotation)
@@ -196,10 +210,11 @@ class ObjectTrackingAnalyzer(
             val yoloDue = zoomBoost || precisionChanged ||
                 (precisionActive && !precisionSeeded) ||
                 (flowResult?.needsYoloRecheck == true) ||
+                (realtimeFlowResult?.needsYoloRecheck == true) ||
                 lastYoloAt == 0L || now - lastYoloAt >= interval
 
             if (!yoloDue) {
-                val predicted = tracker.update(emptyList(), now)
+                val predicted = realtimeTargets ?: tracker.update(emptyList(), now)
                 val bridged = if (precisionSelection != null) {
                     applyPrecisionBetweenAnchors(predicted, precisionSelection, flowObservation, flowScore, now)
                 } else predicted
@@ -207,7 +222,7 @@ class ObjectTrackingAnalyzer(
                     bridged, orientedWidth, orientedHeight, now,
                     bright = false, motion = motionResult.active, filter = activeFilter,
                     rejected = 0, luma = meanLuma, low = lowLight, nv = nightVisionSuggested,
-                    throttled = true, precisionActive = flowGood
+                    throttled = true, precisionActive = realtimeFlowActive || flowGood
                 )
                 return
             }
@@ -256,15 +271,12 @@ class ObjectTrackingAnalyzer(
                 )
             }.toMutableList()
 
-            // Bright-region helper is kept from the successful early versions.
             if (brightObservation != null && observations.none {
                     intersectionOverUnion(it.normalizedBox, brightObservation.normalizedBox) > 0.30f
                 }) {
                 observations += brightObservation
             }
 
-            // SKY still needs UNKNOWN motion candidates, but ordinary ALL/PEOPLE/etc.
-            // never receive motion observations in this control build.
             if (skyWatchEnabled) {
                 motionResult.observations.forEach { candidate ->
                     if (observations.none {
@@ -275,7 +287,18 @@ class ObjectTrackingAnalyzer(
                 }
             }
 
+            // applyFlow above has already moved existing boxes to this camera frame.
+            // YOLO now corrects geometry and refreshes semantic identity/confidence.
             val semanticTargets = tracker.update(observations, afterYolo)
+            val hasRealtimeSeed = semanticTargets.any {
+                it.status == TrackStatus.TRACKING &&
+                    !it.fromBrightnessTracker && !it.fromMotionTracker && !it.fromFlowTracker
+            }
+            if (hasRealtimeSeed) {
+                realtimeTracker.seed(imageProxy, rotation, semanticTargets, afterYolo)
+                realtimeSeeded = true
+            }
+
             val targets = if (precisionSelection != null) {
                 applyPrecisionYoloAnchor(
                     semanticTargets,
@@ -292,7 +315,8 @@ class ObjectTrackingAnalyzer(
                 targets, orientedWidth, orientedHeight, afterYolo,
                 bright = brightObservation != null, motion = motionResult.active, filter = activeFilter,
                 rejected = rejected, luma = meanLuma, low = lowLight, nv = nightVisionSuggested,
-                throttled = false, precisionActive = precisionSelection != null && precisionSeeded
+                throttled = false,
+                precisionActive = realtimeFlowActive || (precisionSelection != null && precisionSeeded)
             )
         } catch (_: Throwable) {
             val now = SystemClock.elapsedRealtime()
@@ -339,8 +363,6 @@ class ObjectTrackingAnalyzer(
             return replaceLockedTarget(targets, selection.trackingId, null, locked)
         }
 
-        // Keep the last precision position briefly while requesting a fresh semantic
-        // anchor. This avoids a one-frame disappearance but never runs away indefinitely.
         val age = if (precisionLastGoodAt > 0L) now - precisionLastGoodAt else Long.MAX_VALUE
         val last = precisionLastBox
         if (last != null && age <= PRECISION_HOLD_MS) {
@@ -402,9 +424,6 @@ class ObjectTrackingAnalyzer(
             fromFlowTracker = false
         )
 
-        // Re-seed LK from the current image and the freshly corrected geometry. The
-        // stable display ID remains the user's original lock ID even if HybridTracker
-        // internally had to reacquire the same object with a different ID.
         precisionTracker.seed(image, rotation, listOf(locked), now)
         precisionSeeded = true
         precisionLastBox = RectF(anchoredBox)
@@ -487,9 +506,6 @@ class ObjectTrackingAnalyzer(
     private fun yoloInterval(meanLuma: Float, zoomBoost: Boolean, precisionActive: Boolean): Long {
         if (zoomBoost) return 0L
         if (precisionActive) {
-            // Give LK enough camera frames to interpolate between semantic anchors.
-            // If LK confidence drops, analyze() forces YOLO immediately regardless of
-            // this interval.
             return when (powerProfile) {
                 TrackingProfile.RESPONSIVE -> if (meanLuma < 24f) 380L else 280L
                 TrackingProfile.BALANCED -> when {
@@ -668,6 +684,7 @@ class ObjectTrackingAnalyzer(
     override fun close() {
         tracker.reset()
         motionDetector.reset()
+        realtimeTracker.reset()
         precisionTracker.reset()
         presentationSmoother.reset()
         if (yoloDetector.isInitialized()) yoloDetector.value.close()

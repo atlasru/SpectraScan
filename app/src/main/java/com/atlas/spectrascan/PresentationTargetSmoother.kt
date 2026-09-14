@@ -5,10 +5,8 @@ import kotlin.math.exp
 import kotlin.math.hypot
 
 /**
- * Smooths boxes for HUD presentation only. Called on every analyzer frame.
- *
- * Tracking algorithms are still the source of truth; this layer only controls
- * how quickly the visible rectangle catches up with their latest estimate.
+ * Presentation-only smoothing. Center motion stays highly responsive while box size
+ * is damped more strongly to hide detector edge jitter.
  */
 internal class PresentationTargetSmoother {
     private data class State(
@@ -45,52 +43,43 @@ internal class PresentationTargetSmoother {
                     ratio(desired.height(), state.box.height())
                 )
 
-                // Only impossible geometry snaps. Normal YOLO/LK corrections — even fairly
-                // large ones — animate into place instead of visibly teleporting.
-                if (centerJump > 0.62f || sizeRatio > 4.5f) {
+                if (centerJump > 0.42f || sizeRatio > 4.5f) {
                     state.box = RectF(desired)
                 } else {
-                    val baseResponse = when (profile) {
-                        TrackingProfile.SMOOTH -> 9.5f
-                        TrackingProfile.BALANCED -> 14.0f
-                        TrackingProfile.RESPONSIVE -> 19.0f
+                    val centerResponse = when (profile) {
+                        TrackingProfile.SMOOTH -> 28f
+                        TrackingProfile.BALANCED -> 42f
+                        TrackingProfile.RESPONSIVE -> 60f
+                    } * when {
+                        target.fromFlowTracker -> 1.18f
+                        target.status == TrackStatus.PREDICTED -> 0.88f
+                        target.status == TrackStatus.LOST -> 0.62f
+                        else -> 1f
                     }
-                    val statusScale = when (target.status) {
-                        TrackStatus.TRACKING -> 1.00f
-                        TrackStatus.ACQUIRING -> 0.82f
-                        TrackStatus.PREDICTED -> 0.72f
-                        TrackStatus.LOST -> 0.60f
+                    val sizeResponse = when (profile) {
+                        TrackingProfile.SMOOTH -> 8.5f
+                        TrackingProfile.BALANCED -> 12.5f
+                        TrackingProfile.RESPONSIVE -> 18f
                     }
 
-                    // Catch up faster when the detector makes a large correction, but keep
-                    // several rendered intermediate positions so the eye sees movement.
-                    val jumpBoost = when {
-                        centerJump > 0.30f -> 2.10f
-                        centerJump > 0.16f -> 1.70f
-                        centerJump > 0.08f -> 1.35f
-                        else -> 1.00f
-                    }
-                    val response = baseResponse * statusScale * jumpBoost
-                    val maxAlpha = when (profile) {
-                        TrackingProfile.SMOOTH -> 0.76f
-                        TrackingProfile.BALANCED -> 0.84f
-                        TrackingProfile.RESPONSIVE -> 0.88f
-                    }
-                    val alpha = (1f - exp(-response * dt)).coerceIn(0.035f, maxAlpha)
+                    var centerAlpha = (1f - exp(-centerResponse * dt)).coerceIn(0.18f, 0.985f)
+                    if (centerJump > 0.18f) centerAlpha = maxOf(centerAlpha, 0.94f)
+                    else if (centerJump > 0.08f) centerAlpha = maxOf(centerAlpha, 0.82f)
+                    val sizeAlpha = (1f - exp(-sizeResponse * dt)).coerceIn(0.06f, 0.72f)
 
                     val lookAhead = when {
-                        target.status != TrackStatus.TRACKING && target.status != TrackStatus.PREDICTED -> 0f
-                        profile == TrackingProfile.RESPONSIVE -> 0.028f
-                        profile == TrackingProfile.BALANCED -> 0.036f
-                        else -> 0.045f
+                        target.fromFlowTracker -> 0.010f
+                        target.status == TrackStatus.PREDICTED -> 0.035f
+                        target.status == TrackStatus.TRACKING -> 0.018f
+                        else -> 0f
                     }
-                    val predicted = shift(desired, target.velocityX * lookAhead, target.velocityY * lookAhead)
-                    state.box = RectF(
-                        lerp(state.box.left, predicted.left, alpha),
-                        lerp(state.box.top, predicted.top, alpha),
-                        lerp(state.box.right, predicted.right, alpha),
-                        lerp(state.box.bottom, predicted.bottom, alpha)
-                    )
+                    val targetCx = desired.centerX() + target.velocityX * lookAhead
+                    val targetCy = desired.centerY() + target.velocityY * lookAhead
+                    val cx = lerp(state.box.centerX(), targetCx, centerAlpha)
+                    val cy = lerp(state.box.centerY(), targetCy, centerAlpha)
+                    val width = lerp(state.box.width(), desired.width(), sizeAlpha)
+                    val height = lerp(state.box.height(), desired.height(), sizeAlpha)
+                    state.box = rectFromCenter(cx, cy, width, height)
                 }
                 target.copy(normalizedBox = RectF(state.box))
             }
@@ -99,12 +88,14 @@ internal class PresentationTargetSmoother {
         return result
     }
 
-    private fun shift(box: RectF, dx: Float, dy: Float): RectF {
-        val w = box.width().coerceIn(0.002f, 1f)
-        val h = box.height().coerceIn(0.002f, 1f)
-        val left = (box.left + dx).coerceIn(0f, 1f - w)
-        val top = (box.top + dy).coerceIn(0f, 1f - h)
-        return RectF(left, top, left + w, top + h)
+    private fun rectFromCenter(cx: Float, cy: Float, width: Float, height: Float): RectF {
+        val w = width.coerceIn(0.002f, 1f)
+        val h = height.coerceIn(0.002f, 1f)
+        val halfW = w / 2f
+        val halfH = h / 2f
+        val safeCx = cx.coerceIn(halfW, 1f - halfW)
+        val safeCy = cy.coerceIn(halfH, 1f - halfH)
+        return RectF(safeCx - halfW, safeCy - halfH, safeCx + halfW, safeCy + halfH)
     }
 
     private fun ratio(a: Float, b: Float): Float {
