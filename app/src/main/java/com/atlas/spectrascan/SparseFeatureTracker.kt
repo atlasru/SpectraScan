@@ -120,13 +120,34 @@ internal class SparseFeatureTracker {
             return Result(emptyList(), false, 0f, true)
         }
 
+        // Forward-backward consistency rejects points that slide onto the
+        // background or an occluder. Use exactly the same optical-flow pyramid
+        // in both directions to keep the correspondence test deterministic.
+        val backPts = MatOfPoint2f()
+        val backStatus = MatOfByte()
+        val backErrors = MatOfFloat()
+        val reverseOk = try {
+            Video.calcOpticalFlowPyrLK(
+                gray, oldGray, nextPts, backPts, backStatus, backErrors,
+                Size(21.0, 21.0), 2,
+                TermCriteria(TermCriteria.COUNT or TermCriteria.EPS, 12, 0.03),
+                0, 1e-4
+            )
+            true
+        } catch (_: Throwable) {
+            false
+        }
         val newArray = nextPts.toArray()
         val statusArray = status.toArray()
         val errArray = errors.toArray()
+        val backArray = if (reverseOk) backPts.toArray() else emptyArray()
+        val backStatusArray = if (reverseOk) backStatus.toArray() else byteArrayOf()
         val byOwner = linkedMapOf<Int, MutableList<Pair<Point, Point>>>()
         for (i in oldPoints.indices) {
             if (i >= newArray.size || i >= statusArray.size || statusArray[i].toInt() == 0) continue
+            if (i >= backArray.size || i >= backStatusArray.size || backStatusArray[i].toInt() == 0) continue
             if (i < errArray.size && errArray[i] > MAX_LK_ERROR) continue
+            if (hypot(backArray[i].x - oldPoints[i].x, backArray[i].y - oldPoints[i].y) > MAX_FB_ERROR_PX) continue
             byOwner.getOrPut(owners[i]) { mutableListOf() } += oldPoints[i] to newArray[i]
         }
 
@@ -200,6 +221,7 @@ internal class SparseFeatureTracker {
         states.entries.removeAll { (_, s) -> now - s.lastGoodAt > HARD_TTL_MS }
         prevGray?.release(); prevGray = gray
         prevPts.release(); nextPts.release(); status.release(); errors.release()
+        backPts.release(); backStatus.release(); backErrors.release()
         val average = if (observations.isEmpty()) 0f else scoreSum / observations.size
         return Result(observations, observations.isNotEmpty(), average, needsRecheck)
     }
@@ -273,6 +295,7 @@ internal class SparseFeatureTracker {
         const val MIN_POINTS = 4
         const val RESEED_POINTS = 8
         const val MAX_LK_ERROR = 28f
+        const val MAX_FB_ERROR_PX = 2.5
         const val OUTLIER_RADIUS_PX = 6.5
         const val MAX_FRAME_SHIFT = .12
         const val RECHECK_AFTER_MS = 520L

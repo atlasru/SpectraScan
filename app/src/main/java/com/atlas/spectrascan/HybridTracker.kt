@@ -113,6 +113,16 @@ internal class HybridTracker {
         return buildTargets(now)
     }
 
+    // Between semantic passes, advance geometry WITHOUT treating the empty
+    // per-frame prediction as a failed YOLO detection. Otherwise consecutive
+    // confirmation hits can never accumulate when YOLO runs at 2-5 FPS.
+    @Synchronized
+    fun predict(now: Long): List<DetectionTarget> {
+        tracks.values.forEach { predictMissingTrack(it, now) }
+        pruneExpired(now)
+        return buildTargets(now)
+    }
+
     @Synchronized
     fun snapshot(now: Long): List<DetectionTarget> = buildTargets(now)
 
@@ -125,7 +135,7 @@ internal class HybridTracker {
     private fun pruneExpired(now: Long) {
         tracks.entries.removeAll { (_, track) ->
             val missingFor = now - track.lastSeenAt
-            if (track.confirmed) missingFor > profile.holdMs else missingFor > 500L
+            if (track.confirmed) missingFor > profile.holdMs else missingFor > 1_600L
         }
     }
 
@@ -167,10 +177,9 @@ internal class HybridTracker {
     }.sortedBy { it.trackingId }
 
     private fun requiredConfirmationHits(track: Track): Int = when {
-        track.fromBrightnessTracker -> 2
-        track.fromMotionTracker -> 2
-        track.label in FAST_CONFIRM_LABELS -> 2
-        else -> 3
+        track.fromBrightnessTracker || track.fromMotionTracker -> 2
+        track.confidence >= 0.65f -> 1 // Unambiguous high-confidence first acquisition.
+        else -> 2
     }
 
     private fun findBestTrack(observation: RawObservation, availableIds: Set<Int>): Track? {
