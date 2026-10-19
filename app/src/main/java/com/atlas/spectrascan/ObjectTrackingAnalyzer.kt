@@ -7,7 +7,9 @@ import android.os.SystemClock
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.hypot
 import kotlin.math.max
 
@@ -30,6 +32,25 @@ class ObjectTrackingAnalyzer(
     private val realtimeTracker = SparseFeatureTracker()
     private val precisionTracker = SparseFeatureTracker()
     private val yoloDetector = lazy { YoloDetector(SpectraScanApplication.appContext) }
+
+    // The inference lane owns ONNX/bitmap buffers; only the analyzer lane mutates trackers.
+    private val inferenceExecutor = Executors.newSingleThreadExecutor()
+    private val inferenceBusy = AtomicBoolean(false)
+    private val inferenceResult = AtomicReference<AsyncInferenceResult?>(null)
+    private val closed = AtomicBoolean(false)
+    @Volatile private var trackingGeneration = 0L
+
+    private data class AsyncInferenceResult(
+        val detections: List<YoloDetection>,
+        val rejected: Int,
+        val sourceAtMs: Long,
+        val sourceTimestampNs: Long,
+        val filter: TargetFilter,
+        val generation: Long,
+        val bright: RawObservation?,
+        val inferenceMs: Long,
+        val failed: Boolean
+    )
 
     private var lastResultAt = 0L
     private var lastYoloAt = 0L
@@ -89,6 +110,8 @@ class ObjectTrackingAnalyzer(
     }
 
     private fun resetTrackingState() {
+        trackingGeneration++
+        inferenceResult.set(null)
         tracker.reset()
         motionDetector.reset()
         presentationSmoother.reset()
@@ -125,7 +148,7 @@ class ObjectTrackingAnalyzer(
     }
 
     override fun analyze(imageProxy: ImageProxy) {
-        if (!busy.compareAndSet(false, true)) {
+        if (closed.get() || !busy.compareAndSet(false, true)) {
             imageProxy.close()
             return
         }
@@ -205,6 +228,51 @@ class ObjectTrackingAnalyzer(
                 return
             }
 
+
+            // Consume one completed semantic anchor on this camera frame, not on
+            // the worker thread. LK keeps running while ONNX processes an older frame.
+            val completed = inferenceResult.getAndSet(null)
+            var anchored: List<DetectionTarget>? = null
+            var rejected = 0
+            var bright = false
+            if (completed != null && !completed.failed &&
+                completed.generation == trackingGeneration && completed.filter == activeFilter
+            ) {
+                lastYoloMs = completed.inferenceMs
+                rejected = completed.rejected
+                bright = completed.bright != null
+                val observations = alignSemanticObservations(
+                    completed.detections, completed.sourceAtMs, now
+                ).toMutableList()
+                completed.bright?.let { observation ->
+                    if (observations.none {
+                        intersectionOverUnion(it.normalizedBox, observation.normalizedBox) > 0.30f
+                    }) observations += observation
+                }
+                if (skyWatchEnabled) {
+                    motionResult.observations.forEach { candidate ->
+                        if (observations.none {
+                            intersectionOverUnion(it.normalizedBox, candidate.normalizedBox) > 0.16f
+                        }) observations += candidate
+                    }
+                }
+                val semanticTargets = tracker.update(observations, now)
+                val seeds = semanticTargets.filter {
+                    it.status == TrackStatus.TRACKING &&
+                        !it.fromBrightnessTracker && !it.fromMotionTracker && !it.fromFlowTracker
+                }
+                if (seeds.isNotEmpty()) {
+                    realtimeTracker.seed(imageProxy, rotation, seeds, now)
+                    realtimeSeeded = true
+                }
+                anchored = if (precisionSelection != null) {
+                    applyPrecisionYoloAnchor(
+                        semanticTargets, precisionSelection, flowObservation, flowScore,
+                        imageProxy, rotation, now
+                    )
+                } else semanticTargets
+            }
+
             val precisionActive = precisionSelection != null
             val interval = yoloInterval(meanLuma, zoomBoost, precisionActive)
             val yoloDue = zoomBoost || precisionChanged ||
@@ -212,111 +280,83 @@ class ObjectTrackingAnalyzer(
                 (flowResult?.needsYoloRecheck == true) ||
                 (realtimeFlowResult?.needsYoloRecheck == true) ||
                 lastYoloAt == 0L || now - lastYoloAt >= interval
-
-            if (!yoloDue) {
-                val predicted = realtimeTargets ?: tracker.update(emptyList(), now)
-                val bridged = if (precisionSelection != null) {
-                    applyPrecisionBetweenAnchors(predicted, precisionSelection, flowObservation, flowScore, now)
-                } else predicted
-                dispatchFrame(
-                    bridged, orientedWidth, orientedHeight, now,
-                    bright = false, motion = motionResult.active, filter = activeFilter,
-                    rejected = 0, luma = meanLuma, low = lowLight, nv = nightVisionSuggested,
-                    throttled = true, precisionActive = realtimeFlowActive || flowGood
-                )
-                return
-            }
-
-            previousYoloAt = lastYoloAt
-            lastYoloAt = now
-
-            val brightObservation = if (!skyWatchEnabled &&
-                (activeFilter == TargetFilter.ALL || activeFilter == TargetFilter.SCREENS)
-            ) {
-                findBrightRegion(imageProxy, rotation, meanLuma)
-            } else null
-
-            val cameraBitmap = imageProxy.toBitmap()
-            val orientedBitmap = rotateBitmap(cameraBitmap, rotation)
-            val automaticGain = when {
-                meanLuma < 28f -> 1.75f
-                meanLuma < 45f -> 1.45f
-                meanLuma < 70f -> 1.20f
-                else -> 1f
-            }
-            val effectiveGain = maxOf(digitalGain, automaticGain)
-
-            val yoloStarted = SystemClock.elapsedRealtime()
-            val detectionResult = try {
-                yoloDetector.value.detect(orientedBitmap, activeFilter, effectiveGain)
-            } finally {
-                if (orientedBitmap !== cameraBitmap && !orientedBitmap.isRecycled) orientedBitmap.recycle()
-                if (!cameraBitmap.isRecycled) cameraBitmap.recycle()
-            }
-            val afterYolo = SystemClock.elapsedRealtime()
-            lastYoloMs = afterYolo - yoloStarted
-            lastYoloFps = if (previousYoloAt <= 0L) 0 else {
-                (1000L / max(1L, lastYoloAt - previousYoloAt)).toInt().coerceIn(0, 30)
-            }
-
-            val (detections, rejected) = detectionResult
-            val observations = detections.map { detection ->
-                RawObservation(
-                    sourceTrackingId = null,
-                    label = detection.label,
-                    confidence = detection.confidence,
-                    normalizedBox = detection.normalizedBox,
-                    maskCells = detection.maskCells,
-                    maskQuality = detection.maskQuality
-                )
-            }.toMutableList()
-
-            if (brightObservation != null && observations.none {
-                    intersectionOverUnion(it.normalizedBox, brightObservation.normalizedBox) > 0.30f
-                }) {
-                observations += brightObservation
-            }
-
-            if (skyWatchEnabled) {
-                motionResult.observations.forEach { candidate ->
-                    if (observations.none {
-                            intersectionOverUnion(it.normalizedBox, candidate.normalizedBox) > 0.16f
-                        }) {
-                        observations += candidate
+            if (yoloDue && !closed.get() && inferenceBusy.compareAndSet(false, true)) {
+                try {
+                    val brightObservation = if (!skyWatchEnabled &&
+                        (activeFilter == TargetFilter.ALL || activeFilter == TargetFilter.SCREENS)
+                    ) findBrightRegion(imageProxy, rotation, meanLuma) else null
+                    // Copy pixels while ImageProxy is valid. ONNX never holds an ImageProxy.
+                    val cameraBitmap = imageProxy.toBitmap()
+                    val inputBitmap = try {
+                        rotateBitmap(cameraBitmap, rotation)
+                    } finally {
+                        // rotateBitmap returns the original when rotation == 0.
+                        if (rotation != 0 && !cameraBitmap.isRecycled) cameraBitmap.recycle()
                     }
+                    val automaticGain = when {
+                        meanLuma < 28f -> 1.75f
+                        meanLuma < 45f -> 1.45f
+                        meanLuma < 70f -> 1.20f
+                        else -> 1f
+                    }
+                    val selectedGain = maxOf(digitalGain, automaticGain)
+                    val selectedGeneration = trackingGeneration
+                    val sourceTimestampNs = imageProxy.imageInfo.timestamp
+                    val sourceAtMs = now
+                    // Update cadence when submitted, not after inference completes.
+                    previousYoloAt = lastYoloAt
+                    lastYoloAt = now
+                    lastYoloFps = if (previousYoloAt <= 0L) 0 else {
+                        (1000L / maxOf(1L, now - previousYoloAt)).toInt().coerceIn(0, 30)
+                    }
+                    try {
+                        inferenceExecutor.execute {
+                            val started = SystemClock.elapsedRealtime()
+                            try {
+                                val (detections, countRejected) = yoloDetector.value.detect(
+                                    inputBitmap, activeFilter, selectedGain
+                                )
+                                if (!closed.get()) inferenceResult.set(
+                                    AsyncInferenceResult(
+                                        detections, countRejected, sourceAtMs,
+                                        sourceTimestampNs, activeFilter, selectedGeneration,
+                                        brightObservation, SystemClock.elapsedRealtime() - started, false
+                                    )
+                                )
+                            } catch (_: Throwable) {
+                                if (!closed.get()) inferenceResult.set(
+                                    AsyncInferenceResult(
+                                        emptyList(), 0, sourceAtMs,
+                                        sourceTimestampNs, activeFilter, selectedGeneration,
+                                        null, SystemClock.elapsedRealtime() - started, true
+                                    )
+                                )
+                            } finally {
+                                if (!inputBitmap.isRecycled) inputBitmap.recycle()
+                                inferenceBusy.set(false)
+                            }
+                        }
+                    } catch (error: RuntimeException) {
+                        if (!inputBitmap.isRecycled) inputBitmap.recycle()
+                        throw error
+                    }
+                } catch (_: Throwable) {
+                    inferenceBusy.set(false)
+                    // An allocation/camera error may be transient; retry next frame.
+                    lastYoloAt = 0L
                 }
             }
 
-            // applyFlow above has already moved existing boxes to this camera frame.
-            // YOLO now corrects geometry and refreshes semantic identity/confidence.
-            val semanticTargets = tracker.update(observations, afterYolo)
-            val hasRealtimeSeed = semanticTargets.any {
-                it.status == TrackStatus.TRACKING &&
-                    !it.fromBrightnessTracker && !it.fromMotionTracker && !it.fromFlowTracker
-            }
-            if (hasRealtimeSeed) {
-                realtimeTracker.seed(imageProxy, rotation, semanticTargets, afterYolo)
-                realtimeSeeded = true
-            }
-
-            val targets = if (precisionSelection != null) {
-                applyPrecisionYoloAnchor(
-                    semanticTargets,
-                    precisionSelection,
-                    flowObservation,
-                    flowScore,
-                    imageProxy,
-                    rotation,
-                    afterYolo
-                )
-            } else semanticTargets
-
+            val targets = anchored ?: realtimeTargets ?: tracker.update(emptyList(), now)
+            val bridged = if (precisionSelection != null && anchored == null) {
+                applyPrecisionBetweenAnchors(targets, precisionSelection, flowObservation, flowScore, now)
+            } else targets
             dispatchFrame(
-                targets, orientedWidth, orientedHeight, afterYolo,
-                bright = brightObservation != null, motion = motionResult.active, filter = activeFilter,
+                bridged, orientedWidth, orientedHeight, now,
+                bright = bright, motion = motionResult.active, filter = activeFilter,
                 rejected = rejected, luma = meanLuma, low = lowLight, nv = nightVisionSuggested,
-                throttled = false,
-                precisionActive = realtimeFlowActive || (precisionSelection != null && precisionSeeded)
+                throttled = anchored == null,
+                precisionActive = realtimeFlowActive || flowGood || (precisionSelection != null && precisionSeeded)
             )
         } catch (_: Throwable) {
             val now = SystemClock.elapsedRealtime()
@@ -543,6 +583,49 @@ class ObjectTrackingAnalyzer(
         }
     }
 
+    /**
+     * ONNX boxes describe an older sensor frame. Prefer the *current* LK geometry
+     * for an unambiguous, already-confirmed same-class target. Never transfer
+     * semantic identity to another class, and never extrapolate an unmatched box
+     * indefinitely. This avoids a late detector pass dragging HUD geometry back.
+     */
+    private fun alignSemanticObservations(
+        detections: List<YoloDetection>, sourceAtMs: Long, now: Long
+    ): List<RawObservation> {
+        val current = tracker.snapshot(now).filter {
+            it.status == TrackStatus.TRACKING && it.fromFlowTracker &&
+                !it.fromBrightnessTracker && !it.fromMotionTracker
+        }
+        val ageSec = ((now - sourceAtMs).coerceAtLeast(0L) / 1000f).coerceAtMost(0.75f)
+        val used = mutableSetOf<Int>()
+        return detections.map { detection ->
+            val raw = detection.normalizedBox
+            val match = current.asSequence()
+                .filter { it.label == detection.label && it.trackingId !in used }
+                .map { candidate ->
+                    // Back-project current LK geometry toward the detector frame.
+                    val back = RectF(candidate.normalizedBox).apply {
+                        offset(-candidate.velocityX * ageSec, -candidate.velocityY * ageSec)
+                    }
+                    val iou = intersectionOverUnion(raw, back)
+                    val distance = centerDistance(raw, back)
+                    candidate to (iou * 2f - distance)
+                }
+                .filter { it.second > 0.14f }
+                .maxByOrNull { it.second }?.first
+            if (match != null) used += match.trackingId
+            RawObservation(
+                sourceTrackingId = match?.trackingId,
+                label = detection.label,
+                confidence = detection.confidence,
+                // Correct confidence/class using YOLO; geometry remains current LK.
+                normalizedBox = if (match != null) RectF(match.normalizedBox) else RectF(raw),
+                maskCells = if (match != null) emptyList() else detection.maskCells,
+                maskQuality = if (match != null) 0f else detection.maskQuality
+            )
+        }
+    }
+
     private fun dispatchFrame(
         targets: List<DetectionTarget>,
         w: Int,
@@ -577,7 +660,7 @@ class ObjectTrackingAnalyzer(
             detectionThrottled = throttled,
             frameAtMs = now
         )
-        callbackExecutor.execute { onFrame(frame) }
+        if (!closed.get()) callbackExecutor.execute { if (!closed.get()) onFrame(frame) }
     }
 
     private fun rotateBitmap(source: Bitmap, rotation: Int): Bitmap {
@@ -682,12 +765,15 @@ class ObjectTrackingAnalyzer(
     }
 
     override fun close() {
-        tracker.reset()
-        motionDetector.reset()
-        realtimeTracker.reset()
-        precisionTracker.reset()
-        presentationSmoother.reset()
-        if (yoloDetector.isInitialized()) yoloDetector.value.close()
+        if (!closed.compareAndSet(false, true)) return
+        trackingGeneration++
+        inferenceResult.set(null)
+        // Shutdown is queued after the last inference on the same worker,
+        // so ORT is never closed while detect() is still using its buffers.
+        inferenceExecutor.execute {
+            if (yoloDetector.isInitialized()) yoloDetector.value.close()
+        }
+        inferenceExecutor.shutdown()
     }
 
     private companion object {

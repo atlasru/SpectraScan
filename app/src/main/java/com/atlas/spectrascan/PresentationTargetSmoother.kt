@@ -1,107 +1,139 @@
 package com.atlas.spectrascan
 
 import android.graphics.RectF
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.hypot
 
 /**
- * Presentation-only smoothing. Center motion stays highly responsive while box size
- * is damped more strongly to hide detector edge jitter.
+ * Adaptive One Euro presentation filter. Every target ID has independent center
+ * and size filters; fast motion raises the center cutoff while box size remains
+ * calmer. The flow geometry itself is never changed by this presentation layer.
  */
 internal class PresentationTargetSmoother {
-    private data class State(
-        var box: RectF,
-        var lastAt: Long,
-        var lastSeenInputAt: Long
+    private class TrackState(
+        val x: OneEuroScalar,
+        val y: OneEuroScalar,
+        val w: OneEuroScalar,
+        val h: OneEuroScalar,
+        var lastSeenAt: Long
     )
 
-    private val states = linkedMapOf<Int, State>()
+    private val states = linkedMapOf<Int, TrackState>()
     @Volatile private var profile: TrackingProfile = TrackingProfile.BALANCED
 
     fun setProfile(value: TrackingProfile) { profile = value }
     fun reset() = states.clear()
 
     fun apply(targets: List<DetectionTarget>, now: Long): List<DetectionTarget> {
-        val activeIds = targets.mapTo(mutableSetOf()) { it.trackingId }
+        val active = targets.mapTo(mutableSetOf()) { it.trackingId }
         val result = targets.map { target ->
-            val desired = target.normalizedBox
-            val state = states[target.trackingId]
-            if (state == null) {
-                states[target.trackingId] = State(RectF(desired), now, now)
+            val input = target.normalizedBox
+            val previous = states[target.trackingId]
+            if (previous == null) {
+                states[target.trackingId] = TrackState(
+                    OneEuroScalar(input.centerX()), OneEuroScalar(input.centerY()),
+                    OneEuroScalar(input.width()), OneEuroScalar(input.height()), now
+                )
                 target
             } else {
-                val dt = ((now - state.lastAt).coerceAtLeast(1L) / 1000f).coerceAtMost(0.10f)
-                state.lastAt = now
-                state.lastSeenInputAt = now
-
-                val centerJump = hypot(
-                    desired.centerX() - state.box.centerX(),
-                    desired.centerY() - state.box.centerY()
-                )
-                val sizeRatio = maxOf(
-                    ratio(desired.width(), state.box.width()),
-                    ratio(desired.height(), state.box.height())
-                )
-
-                if (centerJump > 0.42f || sizeRatio > 4.5f) {
-                    state.box = RectF(desired)
-                } else {
-                    val centerResponse = when (profile) {
-                        TrackingProfile.SMOOTH -> 28f
-                        TrackingProfile.BALANCED -> 42f
-                        TrackingProfile.RESPONSIVE -> 60f
-                    } * when {
-                        target.fromFlowTracker -> 1.18f
-                        target.status == TrackStatus.PREDICTED -> 0.88f
-                        target.status == TrackStatus.LOST -> 0.62f
-                        else -> 1f
-                    }
-                    val sizeResponse = when (profile) {
-                        TrackingProfile.SMOOTH -> 8.5f
-                        TrackingProfile.BALANCED -> 12.5f
-                        TrackingProfile.RESPONSIVE -> 18f
-                    }
-
-                    var centerAlpha = (1f - exp(-centerResponse * dt)).coerceIn(0.18f, 0.985f)
-                    if (centerJump > 0.18f) centerAlpha = maxOf(centerAlpha, 0.94f)
-                    else if (centerJump > 0.08f) centerAlpha = maxOf(centerAlpha, 0.82f)
-                    val sizeAlpha = (1f - exp(-sizeResponse * dt)).coerceIn(0.06f, 0.72f)
-
-                    val lookAhead = when {
-                        target.fromFlowTracker -> 0.010f
-                        target.status == TrackStatus.PREDICTED -> 0.035f
-                        target.status == TrackStatus.TRACKING -> 0.018f
-                        else -> 0f
-                    }
-                    val targetCx = desired.centerX() + target.velocityX * lookAhead
-                    val targetCy = desired.centerY() + target.velocityY * lookAhead
-                    val cx = lerp(state.box.centerX(), targetCx, centerAlpha)
-                    val cy = lerp(state.box.centerY(), targetCy, centerAlpha)
-                    val width = lerp(state.box.width(), desired.width(), sizeAlpha)
-                    val height = lerp(state.box.height(), desired.height(), sizeAlpha)
-                    state.box = rectFromCenter(cx, cy, width, height)
+                val speed = hypot(target.velocityX, target.velocityY)
+                val isFlow = target.fromFlowTracker && target.status == TrackStatus.TRACKING
+                val centerCutoff = when (profile) {
+                    TrackingProfile.RESPONSIVE -> 8f
+                    TrackingProfile.BALANCED -> 6f
+                    TrackingProfile.SMOOTH -> 4f
+                } * if (isFlow) 1.40f else 1f
+                val sizeCutoff = when (profile) {
+                    TrackingProfile.RESPONSIVE -> 3.0f
+                    TrackingProfile.BALANCED -> 2.2f
+                    TrackingProfile.SMOOTH -> 1.5f
                 }
-                target.copy(normalizedBox = RectF(state.box))
+                // Only cover a small estimated presentation age, never lead a
+                // LOST track and never let velocity prediction run away.
+                val lookAhead = if (target.status == TrackStatus.TRACKING ||
+                    target.status == TrackStatus.PREDICTED
+                ) (if (isFlow) .008f else .020f) else 0f
+                val cx = (input.centerX() + target.velocityX * lookAhead).coerceIn(0f, 1f)
+                val cy = (input.centerY() + target.velocityY * lookAhead).coerceIn(0f, 1f)
+                val jump = hypot(cx - previous.x.value, cy - previous.y.value)
+                val sizeJump = maxOf(
+                    input.width() / previous.w.value.coerceAtLeast(.001f),
+                    previous.w.value / input.width().coerceAtLeast(.001f),
+                    input.height() / previous.h.value.coerceAtLeast(.001f),
+                    previous.h.value / input.height().coerceAtLeast(.001f)
+                )
+                val width: Float
+                val height: Float
+                val sx: Float
+                val sy: Float
+                if (jump > .22f || sizeJump > 2.1f || target.status == TrackStatus.LOST) {
+                    // Real reacquisition/large correction: no animated flight.
+                    previous.x.reset(cx); previous.y.reset(cy)
+                    previous.w.reset(input.width()); previous.h.reset(input.height())
+                    sx = cx; sy = cy; width = input.width(); height = input.height()
+                } else {
+                    val beta = if (speed > .15f) 6f else 3f
+                    sx = previous.x.update(cx, now, centerCutoff, beta)
+                    sy = previous.y.update(cy, now, centerCutoff, beta)
+                    width = previous.w.update(input.width(), now, sizeCutoff, 1.0f)
+                    height = previous.h.update(input.height(), now, sizeCutoff, 1.0f)
+                }
+                previous.lastSeenAt = now
+                target.copy(normalizedBox = fromCenter(sx, sy, width, height))
             }
         }
-        states.entries.removeAll { (id, state) -> id !in activeIds && now - state.lastSeenInputAt > 1_500L }
+        states.entries.removeAll { (id, state) ->
+            id !in active && now - state.lastSeenAt > 1_500L
+        }
         return result
     }
 
-    private fun rectFromCenter(cx: Float, cy: Float, width: Float, height: Float): RectF {
-        val w = width.coerceIn(0.002f, 1f)
-        val h = height.coerceIn(0.002f, 1f)
-        val halfW = w / 2f
-        val halfH = h / 2f
-        val safeCx = cx.coerceIn(halfW, 1f - halfW)
-        val safeCy = cy.coerceIn(halfH, 1f - halfH)
-        return RectF(safeCx - halfW, safeCy - halfH, safeCx + halfW, safeCy + halfH)
+    private fun fromCenter(cx: Float, cy: Float, width: Float, height: Float): RectF {
+        val w = width.coerceIn(.002f, 1f)
+        val h = height.coerceIn(.002f, 1f)
+        val x = cx.coerceIn(w / 2f, 1f - w / 2f)
+        val y = cy.coerceIn(h / 2f, 1f - h / 2f)
+        return RectF(x - w / 2f, y - h / 2f, x + w / 2f, y + h / 2f)
+    }
+}
+
+/**
+ * Units are seconds and Hertz. Independent of Android API so it can be tested
+ * with deterministic synthetic motion.
+ */
+internal class OneEuroScalar(initial: Float) {
+    var value: Float = initial
+        private set
+    private var lastInput = initial
+    private var lastAt: Long? = null
+    private var derivative = 0f
+
+    fun reset(x: Float) {
+        value = x
+        lastInput = x
+        derivative = 0f
+        lastAt = null
     }
 
-    private fun ratio(a: Float, b: Float): Float {
-        val lo = minOf(a, b).coerceAtLeast(0.0001f)
-        return maxOf(a, b) / lo
+    fun update(x: Float, timeMs: Long, minCutoff: Float, beta: Float): Float {
+        val previous = lastAt
+        lastAt = timeMs
+        if (previous == null || timeMs <= previous) {
+            value = x
+            lastInput = x
+            return value
+        }
+        val dt = ((timeMs - previous) / 1000f).coerceIn(.001f, .1f)
+        val dx = (x - lastInput) / dt
+        val derivativeAlpha = alpha(1f, dt)
+        derivative += derivativeAlpha * (dx - derivative)
+        lastInput = x
+        val cutoff = minCutoff.coerceAtLeast(.01f) + beta.coerceAtLeast(0f) * abs(derivative)
+        value += alpha(cutoff, dt) * (x - value)
+        return value
     }
 
-    private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
+    private fun alpha(cutoff: Float, dt: Float): Float =
+        (1f - exp((-2f * Math.PI.toFloat() * cutoff * dt).toDouble()).toFloat()).coerceIn(0f, 1f)
 }

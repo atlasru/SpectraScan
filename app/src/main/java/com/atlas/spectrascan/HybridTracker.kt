@@ -167,10 +167,9 @@ internal class HybridTracker {
     }.sortedBy { it.trackingId }
 
     private fun requiredConfirmationHits(track: Track): Int = when {
-        track.fromBrightnessTracker -> 2
-        track.fromMotionTracker -> 2
-        track.label in FAST_CONFIRM_LABELS -> 2
-        else -> 3
+        track.fromBrightnessTracker || track.fromMotionTracker -> 2
+        track.confidence >= 0.65f -> 1 // Unambiguous high-confidence first acquisition.
+        else -> 2
     }
 
     private fun findBestTrack(observation: RawObservation, availableIds: Set<Int>): Track? {
