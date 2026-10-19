@@ -173,6 +173,8 @@ class ObjectTrackingAnalyzer(
             val zoomChanged = zoomGeneration != lastZoomGeneration
             if (zoomChanged) {
                 lastZoomGeneration = zoomGeneration
+                trackingGeneration++
+                inferenceResult.set(null)
                 presentationSmoother.reset()
                 realtimeTracker.reset()
                 realtimeSeeded = false
@@ -347,7 +349,7 @@ class ObjectTrackingAnalyzer(
                 }
             }
 
-            val targets = anchored ?: realtimeTargets ?: tracker.update(emptyList(), now)
+            val targets = anchored ?: realtimeTargets ?: tracker.predict(now)
             val bridged = if (precisionSelection != null && anchored == null) {
                 applyPrecisionBetweenAnchors(targets, precisionSelection, flowObservation, flowScore, now)
             } else targets
@@ -360,7 +362,7 @@ class ObjectTrackingAnalyzer(
             )
         } catch (_: Throwable) {
             val now = SystemClock.elapsedRealtime()
-            val predicted = tracker.update(emptyList(), now)
+            val predicted = tracker.predict(now)
             dispatchFrame(
                 predicted, orientedWidth, orientedHeight, now,
                 bright = false, motion = false, filter = activeFilter,

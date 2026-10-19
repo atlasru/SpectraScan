@@ -113,6 +113,16 @@ internal class HybridTracker {
         return buildTargets(now)
     }
 
+    // Between semantic passes, advance geometry WITHOUT treating the empty
+    // per-frame prediction as a failed YOLO detection. Otherwise consecutive
+    // confirmation hits can never accumulate when YOLO runs at 2-5 FPS.
+    @Synchronized
+    fun predict(now: Long): List<DetectionTarget> {
+        tracks.values.forEach { predictMissingTrack(it, now) }
+        pruneExpired(now)
+        return buildTargets(now)
+    }
+
     @Synchronized
     fun snapshot(now: Long): List<DetectionTarget> = buildTargets(now)
 
