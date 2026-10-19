@@ -135,7 +135,7 @@ internal class HybridTracker {
     private fun pruneExpired(now: Long) {
         tracks.entries.removeAll { (_, track) ->
             val missingFor = now - track.lastSeenAt
-            if (track.confirmed) missingFor > profile.holdMs else missingFor > 500L
+            if (track.confirmed) missingFor > profile.holdMs else missingFor > 1_600L
         }
     }
 
